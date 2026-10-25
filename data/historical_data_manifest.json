@@ -1,0 +1,16 @@
+{
+  "built_from": [
+    "sp500_monthly.csv",
+    "nasdaq_composite_daily.csv",
+    "nasdaq100_daily.csv",
+    "us_recession_monthly.csv"
+  ],
+  "crash_definition": "At least 20% peak-to-trough decline, computed separately for each index and data frequency; these are episodes in the supplied series, not a complete list of all world financial crises.",
+  "nasdaq100_features_rows": 10244,
+  "event_rows": 69,
+  "nasdaq100_feature_targets": {
+    "target_next_close_up": "next recorded daily close exceeds current close",
+    "target_next20d_drawdown10pct": "at least one close during the next 20 sessions is 10% or more below current close"
+  },
+  "created_by": "build_history.py"
+}

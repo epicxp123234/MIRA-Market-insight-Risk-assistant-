@@ -1,0 +1,70 @@
+asset,frequency,event_type,start_date,trough_date,end_date,max_drawdown_pct,label_source
+United States economy,monthly,NBER recession indicator,1854-12-01,,1854-12-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1857-07-01,,1858-12-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1860-11-01,,1861-06-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1865-05-01,,1867-12-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1869-07-01,,1870-12-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1872-05-01,1877-06-01,1880-02-01,-47.3,computed from price series
+United States economy,monthly,NBER recession indicator,1873-11-01,,1879-03-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1881-06-01,1896-08-01,1900-12-01,-42.1,computed from price series
+United States economy,monthly,NBER recession indicator,1882-04-01,,1885-05-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1887-04-01,,1888-04-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1890-08-01,,1891-05-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1893-02-01,,1894-06-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1896-01-01,,1897-06-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1899-07-01,,1900-12-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1902-09-01,1903-10-01,1905-03-01,-29.27,computed from price series
+United States economy,monthly,NBER recession indicator,1902-10-01,,1904-08-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1906-09-01,1907-11-01,1909-08-01,-37.69,computed from price series
+United States economy,monthly,NBER recession indicator,1907-06-01,,1908-06-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1909-12-01,1921-08-01,1925-01-01,-37.38,computed from price series
+United States economy,monthly,NBER recession indicator,1910-02-01,,1912-01-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1913-02-01,,1914-12-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1918-09-01,,1919-03-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1920-02-01,,1921-07-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1923-06-01,,1924-07-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1926-11-01,,1927-11-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1929-09-01,1932-06-01,1954-09-01,-84.76,computed from price series
+United States economy,monthly,NBER recession indicator,1929-09-01,,1933-03-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1937-06-01,,1938-06-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1945-03-01,,1945-10-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1948-12-01,,1949-10-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1953-08-01,,1954-05-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1957-09-01,,1958-04-01,,"FRED USREC, sourced from NBER chronology"
+United States economy,monthly,NBER recession indicator,1960-05-01,,1961-02-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1961-12-01,1962-06-01,1963-09-01,-22.46,computed from price series
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1968-12-01,1970-06-01,1972-03-01,-29.02,computed from price series
+United States economy,monthly,NBER recession indicator,1970-01-01,,1970-11-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1973-01-01,1974-12-01,1980-07-01,-43.35,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1973-01-11,1974-10-03,1978-09-07,-59.9,computed from price series
+United States economy,monthly,NBER recession indicator,1973-12-01,,1975-03-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1978-09-13,1978-11-14,1979-07-26,-20.37,computed from price series
+United States economy,monthly,NBER recession indicator,1980-02-01,,1980-07-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1980-02-08,1980-03-27,1980-07-14,-24.91,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1981-05-29,1982-08-13,1982-11-04,-28.79,computed from price series
+United States economy,monthly,NBER recession indicator,1981-08-01,,1982-11-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1983-06-24,1984-07-25,1986-01-07,-31.5,computed from price series
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,1987-08-01,1987-12-01,1989-07-01,-26.84,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1987-08-26,1987-10-28,1989-08-03,-35.89,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,1987-10-02,1987-10-26,1989-05-26,-39.93,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1989-10-09,1990-10-16,1991-04-02,-33.0,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,1990-07-16,1990-10-11,1991-02-06,-32.9,computed from price series
+United States economy,monthly,NBER recession indicator,1990-08-01,,1991-03-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,1998-07-20,1998-10-08,1998-11-27,-29.55,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,1998-07-20,1998-10-08,1998-11-09,-22.99,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,2000-03-10,2002-10-09,2015-04-23,-77.93,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,2000-03-27,2002-10-07,2015-11-03,-82.9,computed from price series
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,2000-08-01,2003-02-01,2007-05-01,-43.65,computed from price series
+United States economy,monthly,NBER recession indicator,2001-04-01,,2001-11-01,,"FRED USREC, sourced from NBER chronology"
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,2007-10-01,2009-03-01,2013-03-01,-50.82,computed from price series
+United States economy,monthly,NBER recession indicator,2008-01-01,,2009-06-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,2018-08-29,2018-12-24,2019-04-23,-23.64,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,2018-08-29,2018-12-24,2019-04-17,-22.99,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,2020-02-19,2020-03-23,2020-06-08,-30.12,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,2020-02-19,2020-03-20,2020-06-05,-28.03,computed from price series
+United States economy,monthly,NBER recession indicator,2020-03-01,,2020-04-01,,"FRED USREC, sourced from NBER chronology"
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,2021-11-19,2022-12-28,2024-02-29,-36.4,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,2021-11-19,2022-12-28,2023-12-15,-35.56,computed from price series
+S&P 500 / Shiller long-run proxy,monthly,peak-to-trough drawdown >=20%,2021-12-01,2022-10-01,2023-12-01,-20.29,computed from price series
+Nasdaq Composite,daily,peak-to-trough drawdown >=20%,2024-12-16,2025-04-08,2025-06-27,-24.32,computed from price series
+Nasdaq-100,daily,peak-to-trough drawdown >=20%,2025-02-19,2025-04-08,2025-06-24,-22.93,computed from price series

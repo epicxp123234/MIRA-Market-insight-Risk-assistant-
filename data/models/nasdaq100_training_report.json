@@ -1,0 +1,60 @@
+{
+  "model_name": "MIRA \u2014 Market Insight & Risk Assistant",
+  "instrument": "Nasdaq-100 (FRED/Nasdaq daily series)",
+  "data_as_of": "2026-10-23",
+  "trained_on": "2026-10-25",
+  "signal": "HOLD / NO EDGE DETECTED",
+  "next_session_up_probability": 0.53989,
+  "next20_session_10pct_drawdown_risk": 0.03398,
+  "direction": {
+    "holdout_accuracy": 0.5514885309907271,
+    "majority_baseline_accuracy": 0.5602733040507565,
+    "balanced_accuracy": 0.49896601530626056,
+    "precision": 0.5597287428273344,
+    "recall": 0.9346689895470384,
+    "false_positive_rate": 0.9367369589345172,
+    "false_negative_rate": 0.06533101045296168,
+    "confusion": {
+      "true_positive": 1073,
+      "false_positive": 844,
+      "true_negative": 57,
+      "false_negative": 75
+    }
+  },
+  "stress": {
+    "holdout_accuracy": 0.20302586627623231,
+    "majority_baseline_accuracy": 0.91800878477306,
+    "balanced_accuracy": 0.549660135186451,
+    "precision": 0.09055338177752935,
+    "recall": 0.9642857142857143,
+    "false_positive_rate": 0.8649654439128124,
+    "false_negative_rate": 0.03571428571428571,
+    "confusion": {
+      "true_positive": 162,
+      "false_positive": 1627,
+      "true_negative": 254,
+      "false_negative": 6
+    },
+    "decision_threshold": 0.03,
+    "threshold_selection": "F2 on separate chronological validation block",
+    "validation_precision": 0.019891500904159132,
+    "validation_recall": 0.7857142857142857
+  },
+  "train_rows": 6536,
+  "validation_rows": 1619,
+  "holdout_rows": 2049,
+  "purged_boundary_rows": 20,
+  "features": [
+    "1/2/5/10/20-session returns",
+    "5/20-session volatility",
+    "volume change if provided"
+  ],
+  "target_definitions": {
+    "direction": "next recorded close higher than current close",
+    "stress": "any close in next 20 sessions at least 10% below current close"
+  },
+  "crash_event_counts": {
+    "nasdaq100_daily_20pct_drawdowns": 8
+  },
+  "limitation": "One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."
+}
