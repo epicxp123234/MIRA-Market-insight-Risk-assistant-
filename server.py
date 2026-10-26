@@ -292,9 +292,19 @@ TOOLS = [
  {"type":"function","function":{"name":"inspect_dataset","description":"Inspect current CSV schema, row count, binary target counts, and invalid or missing rows. Does not modify data.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"train_predictor","description":"Train the local Python neural network on the supplied labeled CSV, or the selected generated sandbox if no CSV is supplied.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"inspect_holdout","description":"Read metrics from the last held-out evaluation, including confusion counts, false-positive and false-negative rates.","parameters":{"type":"object","properties":{},"required":[]}}},
+ {"type":"function","function":{"name":"inspect_market_evaluation","description":"Use for questions about MIRA Nasdaq forecast accuracy, market-model false-positive rates, false negatives, baselines, or holdout scores. Returns the real chronological market-model holdout metrics, not synthetic sandbox results.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"forecast_nasdaq","description":"Train/evaluate next-session direction and 20-session drawdown-risk models on bundled Nasdaq-100 daily history, or on supplied historical prices. Produces an experimental latest-data signal.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"explore_simulation","description":"Run 100 new generated cases in the simulated bank or market environment. Never accesses external systems.","parameters":{"type":"object","properties":{},"required":[]}}}
 ]
+
+def inspect_market_evaluation():
+    report_path=DATA_DIR/"models"/"nasdaq100_training_report.json"
+    try: report=json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): return {"error":"No saved market evaluation is available. Run a fresh market evaluation first."}
+    def compact(task):
+        return {key:task.get(key) for key in ("holdout_accuracy","majority_baseline_accuracy","precision","recall","false_positive_rate","false_negative_rate") if key in task}
+    metrics={"instrument":report.get("instrument"),"as_of":report.get("data_as_of"),"holdout_rows":report.get("holdout_rows"),"direction":compact(report.get("direction",{})),"stress_drawdown":compact(report.get("stress",{})),"volatility_regime":compact(report.get("volatility_regime",{})),"warning":"These are three different prediction tasks. False-positive rate is FP/(FP+TN). Do not substitute synthetic sandbox metrics."}
+    return metrics
 
 def parse_date(value):
     from datetime import datetime
@@ -453,7 +463,7 @@ def inspect_dataset():
         except (ValueError,TypeError,KeyError): invalid+=1
     return {"rows":len(rows),"target":target,"numeric_features":numeric,"binary_target_counts":labels,"invalid_or_missing_rows":invalid}
 def ollama_chat(messages):
-    body=json.dumps({"model":OLLAMA_MODEL,"messages":messages,"tools":TOOLS,"stream":False,"think":False}).encode()
+    body=json.dumps({"model":OLLAMA_MODEL,"messages":messages,"tools":TOOLS,"stream":False,"think":False,"options":{"num_predict":128,"temperature":0.1}}).encode()
     req=Request("http://127.0.0.1:11434/api/chat",data=body,headers={"Content-Type":"application/json"})
     with urlopen(req,timeout=300) as response: return json.loads(response.read())["message"]
 def run_agent(payload):
@@ -462,7 +472,7 @@ def run_agent(payload):
     prompt=payload.get("prompt","").strip()
     if not prompt: raise ValueError("Enter a goal for the sandbox agent.")
     visible_status("interpreting","Reading your request and selecting from bounded local tools; private chain-of-thought is not exposed.")
-    system=("You are the reasoning core of a local research agent. Understand the user's natural-language goal and use provided Python tools when useful. You may inspect the uploaded labeled dataset, train/evaluate the local neural predictor, inspect holdout metrics, and explore the generated simulation. Never claim to contact the internet, a real bank, a brokerage, or an exchange. You have no such tools. Treat predictions as experiments, not financial advice. Give concise conclusions grounded in tool results. Do not reveal hidden chain-of-thought; report brief plans, actions, observations, and uncertainty.")
+    system=("You are the reasoning core of a local research agent. Understand the user's natural-language goal and use provided Python tools when useful. For ANY question about MIRA market forecast accuracy, market false-positive/false-negative rates, or market holdout metrics, you MUST call inspect_market_evaluation and use its returned values. Never use explore_simulation to answer a real market-model metric question. You may inspect the uploaded labeled dataset, train/evaluate the local neural predictor, inspect evaluation output, and explore the generated simulation when asked. Never claim to contact the internet, a real bank, a brokerage, or an exchange. Treat predictions as experiments, not financial advice. Give concise conclusions grounded in tool results. Do not reveal hidden chain-of-thought; report brief plans, actions, observations, and uncertainty.")
     messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
     actions=[]
     for round_index in range(6):
@@ -480,6 +490,7 @@ def run_agent(payload):
             if name=="inspect_dataset": result=inspect_dataset()
             elif name=="train_predictor": result=train({"task":TASK,"csv":ACTIVE_CSV,"target":ACTIVE_TARGET,"size":1200,"epochs":50})
             elif name=="inspect_holdout": result=LAST_RESULT or {"status":"No training run yet; call train_predictor first."}
+            elif name=="inspect_market_evaluation": result=inspect_market_evaluation()
             elif name=="explore_simulation": result=scan()
             elif name=="forecast_nasdaq": result=forecast_nasdaq({"csv":ACTIVE_CSV,"close_col":ACTIVE_TARGET,"instrument":"Nasdaq-100 (NDX/QQQ)"})
             else: result={"error":"Tool is not allowlisted."}
