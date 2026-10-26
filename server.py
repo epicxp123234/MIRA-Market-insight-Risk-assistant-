@@ -462,6 +462,61 @@ def inspect_dataset():
             else: invalid+=1
         except (ValueError,TypeError,KeyError): invalid+=1
     return {"rows":len(rows),"target":target,"numeric_features":numeric,"binary_target_counts":labels,"invalid_or_missing_rows":invalid}
+
+# ---- MIRA chat decision layer: the verdict comes from MIRA's own saved research, not from the small language model ----
+import re
+def is_decision_question(prompt):
+    p=prompt.lower()
+    wants=re.search(r"\b(buy|sell|hold|invest|trade|outlook|predict|bullish|bearish)\b|should i|what should|good time",p)
+    metric=re.search(r"false positive|false negative|accuracy|error rate|holdout|train|simulat|sandbox|csv|dataset|explore",p)
+    return bool(wants) and not metric
+
+def load_market_report():
+    try: return json.loads((DATA_DIR/"models"/"nasdaq100_training_report.json").read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): return None
+
+def build_decision(report):
+    d=report.get("direction",{})
+    p_up=float(report.get("next_session_up_probability",0.5))
+    p_risk=float(report.get("next20_session_10pct_drawdown_risk",0))
+    p_vol=float(report.get("next20_session_high_volatility_probability",0))
+    signal=str(report.get("signal","HOLD / NO EDGE DETECTED"))
+    verdict="BUY" if signal.startswith("BUY") else ("SELL" if signal.startswith("SELL") else "HOLD")
+    acc,base,bal=d.get("holdout_accuracy"),d.get("majority_baseline_accuracy"),d.get("balanced_accuracy")
+    edge=(acc-base) if acc is not None and base is not None else None
+    if edge is None: reliability="Unknown"
+    elif edge>0 and (bal or 0)>.52: reliability="Some edge"
+    else: reliability="No proven edge"
+    pct=lambda x:"n/a" if x is None else "%.0f%%"%(x*100)
+    pct1=lambda x:"n/a" if x is None else "%.1f%%"%(x*100)
+    if verdict=="BUY": headline="My research leans BUY."
+    elif verdict=="SELL": headline="My research leans SELL / get defensive."
+    else: headline="My research says HOLD - there is no clear reason to buy or sell right now."
+    parts=[headline,
+      "Next session: the model gives about %s chance the market closes higher (50%% is a coin flip)."%pct(p_up),
+      "Next 20 sessions: about %s chance of a 10%% drop, and about %s chance of unusually bumpy trading."%(pct(p_risk),pct(p_vol))]
+    if reliability=="No proven edge":
+        parts.append("Trust level: low. On data it had never seen, it was right %s of the time versus %s for just guessing the most common outcome, so it did not beat guessing."%(pct1(acc),pct1(base)))
+    elif reliability=="Some edge":
+        parts.append("Trust level: modest. On unseen data it was right %s of the time versus %s for guessing."%(pct1(acc),pct1(base)))
+    else: parts.append("Trust level: unknown, no saved test results found.")
+    parts.append("This is a research experiment, not financial advice.")
+    line="SUMMARY | Verdict: %s | Up chance: %s | 10%% drop risk (20 days): %s | Bumpy trading: %s | Unseen-data accuracy: %s vs guessing %s | Data as of %s"%(verdict,pct(p_up),pct(p_risk),pct(p_vol),pct1(acc),pct1(base),report.get("data_as_of","n/a"))
+    summary={"verdict":verdict,"signal":signal,"as_of":report.get("data_as_of"),"up_probability":round(p_up,4),"drawdown_risk_20d":round(p_risk,4),"high_volatility_20d":round(p_vol,4),"holdout_accuracy":acc,"guessing_baseline":base,"reliability":reliability,"holdout_rows":report.get("holdout_rows")}
+    return " ".join(parts)+"\n\n"+line,summary
+
+def answer_decision(prompt):
+    visible_status("tool_call","MIRA chat: reading saved market research for a buy/sell/hold view.")
+    report=load_market_report()
+    if report is None:
+        visible_status("tool_call","No saved market research found; running forecast_nasdaq on the bundled history.")
+        forecast_nasdaq({"csv":"","close_col":"","instrument":"Nasdaq-100 (NDX/QQQ)"})
+        report=load_market_report()
+    if report is None: raise ValueError("Could not load or build the market research report.")
+    answer,summary=build_decision(report)
+    visible_status("observation","Verdict %s from research as of %s: up %.0f%%, 10%% drop risk %.0f%%, accuracy %s"%(summary["verdict"],summary["as_of"],summary["up_probability"]*100,summary["drawdown_risk_20d"]*100,summary["reliability"]))
+    visible_status("complete","Answer ready: "+summary["verdict"],1)
+    return {"answer":answer,"summary":summary,"actions":[{"tool":"market_decision","observation":summary}],"model":"MIRA research (rule-based verdict)"}
 def ollama_chat(messages):
     body=json.dumps({"model":OLLAMA_MODEL,"messages":messages,"tools":TOOLS,"stream":False,"think":False,"options":{"num_predict":128,"temperature":0.1}}).encode()
     req=Request("http://127.0.0.1:11434/api/chat",data=body,headers={"Content-Type":"application/json"})
@@ -471,6 +526,7 @@ def run_agent(payload):
     ACTIVE_CSV=payload.get("csv",""); ACTIVE_TARGET=payload.get("target",""); TASK=payload.get("task","bank")
     prompt=payload.get("prompt","").strip()
     if not prompt: raise ValueError("Enter a goal for the sandbox agent.")
+    if is_decision_question(prompt): return answer_decision(prompt)
     visible_status("interpreting","Reading your request and selecting from bounded local tools; private chain-of-thought is not exposed.")
     system=("You are the reasoning core of a local research agent. Understand the user's natural-language goal and use provided Python tools when useful. For ANY question about MIRA market forecast accuracy, market false-positive/false-negative rates, or market holdout metrics, you MUST call inspect_market_evaluation and use its returned values. Never use explore_simulation to answer a real market-model metric question. You may inspect the uploaded labeled dataset, train/evaluate the local neural predictor, inspect evaluation output, and explore the generated simulation when asked. Never claim to contact the internet, a real bank, a brokerage, or an exchange. Treat predictions as experiments, not financial advice. Give concise conclusions grounded in tool results. Do not reveal hidden chain-of-thought; report brief plans, actions, observations, and uncertainty.")
     messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
@@ -494,7 +550,7 @@ def run_agent(payload):
             elif name=="explore_simulation": result=scan()
             elif name=="forecast_nasdaq": result=forecast_nasdaq({"csv":ACTIVE_CSV,"close_col":ACTIVE_TARGET,"instrument":"Nasdaq-100 (NDX/QQQ)"})
             else: result={"error":"Tool is not allowlisted."}
-            compact={k:v for k,v in result.items() if k not in ("trace","logs")}
+            compact={k:v for k,v in result.items() if k not in ("trace","logs","holdout_trace","learning_trace")}
             actions.append({"tool":name,"observation":compact})
             visible_status("observation","Tool "+name+" returned "+json.dumps(compact,ensure_ascii=False)[:180])
             messages.append({"role":"tool","tool_name":name,"content":json.dumps(compact)})
