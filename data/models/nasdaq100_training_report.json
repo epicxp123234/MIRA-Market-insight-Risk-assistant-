@@ -4,50 +4,81 @@
   "data_as_of": "2026-10-23",
   "trained_on": "2026-10-26",
   "signal": "HOLD / NO EDGE DETECTED",
-  "next_session_up_probability": 0.55659,
-  "next20_session_10pct_drawdown_risk": 0.0484,
+  "next_session_up_probability": 0.55951,
+  "next20_session_10pct_drawdown_risk": 0.05934,
+  "next20_session_high_volatility_probability": 0.24106,
   "direction": {
     "holdout_accuracy": 0.5583211322596389,
     "majority_baseline_accuracy": 0.5602733040507565,
-    "balanced_accuracy": 0.4987354352693678,
-    "precision": 0.5596465390279823,
-    "recall": 0.9930313588850174,
-    "false_positive_rate": 0.9955604883462819,
-    "false_negative_rate": 0.006968641114982578,
+    "balanced_accuracy": 0.4986160363823394,
+    "precision": 0.5595880333496812,
+    "recall": 0.9939024390243902,
+    "false_positive_rate": 0.9966703662597114,
+    "false_negative_rate": 0.006097560975609756,
     "confusion": {
-      "true_positive": 1140,
-      "false_positive": 897,
-      "true_negative": 4,
-      "false_negative": 8
+      "true_positive": 1141,
+      "false_positive": 898,
+      "true_negative": 3,
+      "false_negative": 7
     }
   },
   "stress": {
-    "holdout_accuracy": 0.16349438750610054,
+    "holdout_accuracy": 0.2220595412396291,
     "majority_baseline_accuracy": 0.91800878477306,
-    "balanced_accuracy": 0.5362601579706843,
-    "precision": 0.08795309168443496,
-    "recall": 0.9821428571428571,
-    "false_positive_rate": 0.9096225412014886,
-    "false_negative_rate": 0.017857142857142856,
+    "balanced_accuracy": 0.5600269613427509,
+    "precision": 0.09257142857142857,
+    "recall": 0.9642857142857143,
+    "false_positive_rate": 0.8442317916002127,
+    "false_negative_rate": 0.03571428571428571,
     "confusion": {
-      "true_positive": 165,
-      "false_positive": 1711,
-      "true_negative": 170,
-      "false_negative": 3
+      "true_positive": 162,
+      "false_positive": 1588,
+      "true_negative": 293,
+      "false_negative": 6
     },
-    "decision_threshold": 0.02,
+    "decision_threshold": 0.025,
     "threshold_selection": "F2 on separate chronological validation block",
-    "validation_precision": 0.0199203187250996,
-    "validation_recall": 0.8928571428571429
+    "validation_precision": 0.021660649819494584,
+    "validation_recall": 0.8571428571428571
+  },
+  "volatility_regime": {
+    "holdout_accuracy": 0.8003904343582235,
+    "majority_baseline_accuracy": 0.7935578330893118,
+    "balanced_accuracy": 0.5270428236197257,
+    "precision": 0.6842105263157895,
+    "recall": 0.061465721040189124,
+    "false_positive_rate": 0.007380073800738007,
+    "false_negative_rate": 0.9385342789598109,
+    "confusion": {
+      "true_positive": 26,
+      "false_positive": 12,
+      "true_negative": 1614,
+      "false_negative": 397
+    },
+    "target": "next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"
   },
   "train_rows": 6536,
   "validation_rows": 1619,
   "holdout_rows": 2049,
   "purged_boundary_rows": 20,
   "validation_best_epochs": {
-    "direction": 2,
-    "stress": 13
+    "direction": [
+      2,
+      1,
+      2
+    ],
+    "stress": [
+      5,
+      1,
+      7
+    ],
+    "volatility_regime": [
+      13,
+      17,
+      11
+    ]
   },
+  "ensemble_members_per_task": 3,
   "features": [
     "1/2/5/10/20-session returns",
     "5/20-session volatility",
@@ -60,6 +91,6 @@
   "crash_event_counts": {
     "nasdaq100_daily_20pct_drawdowns": 8
   },
-  "training_method": "Validation-loss early stopping on a separate chronological block; final serving model refit with selected epoch counts.",
-  "limitation": "One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."
+  "training_method": "Three independently seeded neural networks per task; ensemble predictions average member probabilities. Each member uses validation-loss early stopping and the final serving ensemble is refit using selected epoch counts.",
+  "limitation": "One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation block to favor recall. Probabilities are not calibrated. Research output only."
 }

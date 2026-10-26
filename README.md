@@ -1,6 +1,6 @@
 # MIRA — Market Insight & Risk Assistant
 
-A local research dashboard with MIRA, a small experimental Python neural-network forecast, historical Nasdaq data, a visual network activity sphere, and an optional local language-model agent.
+A local research dashboard with MIRA, an experimental Python neural-network research models, historical Nasdaq data, a visual network activity sphere, and an optional local language-model agent.
 
 ## Start the dashboard
 
@@ -12,19 +12,19 @@ python server.py
 
 Open http://127.0.0.1:8765. Alternatively, run `start.bat`.
 
-The dashboard has client and operator views. Client view gives a concise market brief; operator view adds the animated sphere, actual weighted-layer diagram and activations, live task/tool trace, forecast probabilities, 20-session drawdown-risk estimate, and chronological holdout metrics. The network diagram updates from the saved model and snapshots during Python training. Use **Run fresh evaluation** to train and score both classifiers again. You may upload a dated daily-price CSV with a close column.
+The dashboard has client and operator views. Client view gives a concise market brief; operator view adds the animated sphere, actual weighted-layer diagram and activations, live task/tool trace, forecast probabilities, 20-session drawdown and volatility-regime estimates, and chronological holdout metrics. It trains three independently seeded MLPs for each of three tasks (direction, drawdown risk, and elevated-volatility regime) and averages their probabilities. The network diagram shows representative learned weights and the ensemble output. Use **Run fresh evaluation** to retrain and score these models; additional members do not guarantee better accuracy. You may upload a dated daily-price CSV with a close column.
 
 ## Free live quote feed
 
-The **Live market data · QQQ** panel uses Alpaca Basic's free IEX feed for real-time, single-venue QQQ quotes. During the overnight session the free `overnight` feed provides real-time indicative quotes and 15-minute delayed trades. It polls the local Python server every five seconds. Alpaca API key ID and secret can be entered in the panel; the server keeps them in memory only and sends them over HTTPS to `data.alpaca.markets`. They are not written to disk or displayed in the dashboard. Restarting the server clears them. The free feed is not the consolidated all-exchange SIP tape.
+The **Live market data · QQQ** panel uses Alpaca Basic's free IEX feed for real-time, single-venue QQQ quotes. During the overnight session the free `overnight` feed provides real-time indicative quotes and 15-minute delayed trades. It polls the local Python server every five seconds. Alpaca API key ID and secret can be entered in the panel; the server sends them over HTTPS to `data.alpaca.markets`. On Windows, they are also encrypted with the current user account’s DPAPI and stored in a small SQLite file under `%LOCALAPPDATA%\MIRA\credentials.sqlite3`. They are never returned to the browser. Use **Forget saved keys** to clear the encrypted store. If Windows DPAPI is unavailable, keys work for the current session only. The free feed is not the consolidated all-exchange SIP tape.
 
 QQQ is an ETF proxy for the Nasdaq-100. The live quote display is separate from the existing daily-trained neural forecast; connecting live quotes does not make that model an intraday or pre-market predictor. Nasdaq equities are not active all the time: the free overnight session operates five days a week and markets close on weekends and exchange holidays.
 
-The sphere renders the selected model’s actual learned weights and forward-pass activations as signed paths and signal pulses; it is a visualization, not a literal brain scan or a display of private chain-of-thought. Forecast probabilities are uncalibrated. The latest chronological holdout did not beat a majority-class direction baseline. A recall-focused stress threshold catches more labeled events at the cost of many false alarms. MIRA reports that tradeoff; it does not promise 80% accuracy and should be treated as research only.
+The sphere renders the selected model’s actual learned weights and forward-pass activations as signed paths and signal pulses; it is a visualization, not a literal brain scan or a display of private chain-of-thought. Forecast probabilities are uncalibrated. The current one-period chronological holdout did not beat a majority-class direction baseline. A recall-focused stress threshold catches more labeled events at the cost of many false alarms. MIRA reports that tradeoff; it does not promise 80% accuracy and should be treated as research only.
 
 ## Local reasoning model
 
-The agent panel accepts natural-language goals and can call bounded local tools to inspect data, run the predictor, inspect evaluation output, and explore synthetic sandbox cases. It does not have a general web browser, arbitrary shell access, brokerage access, or bank-system access.
+The Ollama status badge reports whether the local service and the configured model are both available. If it is offline, start Ollama; if the model is missing, run `ollama pull qwen3.5:4b`. The agent panel accepts natural-language goals and can call bounded local tools to inspect data, run the predictor, inspect evaluation output, and explore synthetic sandbox cases. It does not have a general web browser, arbitrary shell access, brokerage access, or bank-system access.
 
 Install Ollama from [the official Windows download](https://ollama.com/download/windows), then run:
 

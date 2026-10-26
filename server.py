@@ -1,6 +1,7 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import json, math, random, csv, io, time, os
+import json, math, random, csv, io, time, os, sqlite3, ctypes
+from contextlib import closing
 from datetime import date, datetime, time as dt_time, timezone, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -19,6 +20,61 @@ ENGINE_STATUS = {"state":"idle","detail":"Ready for a local research task.","pro
 MARKET_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 MARKET_API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 MARKET_CACHE = {"at":0.0,"data":None}
+
+def credential_db_path():
+    base=Path(os.environ.get("LOCALAPPDATA",str(Path.home()/"AppData"/"Local")))
+    folder=base/"MIRA"
+    folder.mkdir(parents=True,exist_ok=True)
+    return folder/"credentials.sqlite3"
+
+class _DataBlob(ctypes.Structure):
+    _fields_=[("cbData",ctypes.c_uint32),("pbData",ctypes.POINTER(ctypes.c_ubyte))]
+
+def _dpapi(data, protect):
+    if os.name!="nt": raise OSError("Windows DPAPI is required to persist credentials securely.")
+    crypt=ctypes.WinDLL("Crypt32.dll",use_last_error=True); kernel=ctypes.WinDLL("Kernel32.dll",use_last_error=True)
+    kernel.LocalFree.argtypes=[ctypes.c_void_p]; kernel.LocalFree.restype=ctypes.c_void_p
+    source_buf=(ctypes.c_ubyte*len(data)).from_buffer_copy(data)
+    source=_DataBlob(len(data),ctypes.cast(source_buf,ctypes.POINTER(ctypes.c_ubyte))); output=_DataBlob()
+    if protect:
+        fn=crypt.CryptProtectData
+        fn.argtypes=[ctypes.POINTER(_DataBlob),ctypes.c_wchar_p,ctypes.POINTER(_DataBlob),ctypes.c_void_p,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(_DataBlob)]
+        ok=fn(ctypes.byref(source),"MIRA market-data credentials",None,None,None,1,ctypes.byref(output))
+    else:
+        description=ctypes.c_wchar_p(); fn=crypt.CryptUnprotectData
+        fn.argtypes=[ctypes.POINTER(_DataBlob),ctypes.POINTER(ctypes.c_wchar_p),ctypes.POINTER(_DataBlob),ctypes.c_void_p,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(_DataBlob)]
+        ok=fn(ctypes.byref(source),ctypes.byref(description),None,None,None,1,ctypes.byref(output))
+        if description: kernel.LocalFree(description)
+    if not ok: raise ctypes.WinError(ctypes.get_last_error())
+    try: return ctypes.string_at(output.pbData,output.cbData)
+    finally: kernel.LocalFree(output.pbData)
+
+def save_market_credentials(key,secret):
+    protected_key=_dpapi(key.encode("utf-8"),True); protected_secret=_dpapi(secret.encode("utf-8"),True)
+    with closing(sqlite3.connect(credential_db_path())) as db:
+        with db:
+            db.execute("CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, value BLOB NOT NULL)")
+            db.executemany("INSERT INTO credentials(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",[("alpaca_key",protected_key),("alpaca_secret",protected_secret)])
+
+def load_market_credentials():
+    try:
+        with closing(sqlite3.connect(credential_db_path())) as db:
+            row=db.execute("SELECT name,value FROM credentials WHERE name IN ('alpaca_key','alpaca_secret')").fetchall()
+        values={name:_dpapi(value,False).decode("utf-8") for name,value in row}
+        return values.get("alpaca_key",""),values.get("alpaca_secret","")
+    except (OSError,sqlite3.Error,ValueError): return "",""
+
+def clear_market_credentials():
+    path=credential_db_path()
+    try:
+        with closing(sqlite3.connect(path)) as db:
+            with db: db.execute("DROP TABLE IF EXISTS credentials")
+            db.execute("VACUUM")
+        path.unlink(missing_ok=True)
+    except (OSError,sqlite3.Error): pass
+
+if not MARKET_API_KEY or not MARKET_API_SECRET:
+    MARKET_API_KEY,MARKET_API_SECRET=load_market_credentials()
 
 def visible_status(stage, detail, progress=None, network=None):
     global ENGINE_STATUS
@@ -116,6 +172,8 @@ def forward(model, x):
     return hidden, p
 
 def predict(model, x):
+    members=model.get("members") if isinstance(model,dict) else None
+    if members: return sum(forward(member,x)[1] for member in members)/len(members)
     return forward(model,x)[1]
 
 def cross_entropy(model, data):
@@ -281,7 +339,7 @@ def forecast_nasdaq(payload):
         if volume_col and prices[i][2]>0 and prices[i-1][2]>0:
             volchange=max(-3,min(3,math.log(prices[i][2]/prices[i-1][2])))
         return [daily[i],close[i]/close[i-2]-1,close[i]/close[i-5]-1,close[i]/close[i-10]-1,close[i]/close[i-20]-1,std(daily[i-4:i+1]),std(daily[i-19:i+1]),volchange]
-    examples=[{"x":features(i),"up":int(close[i+1]>close[i]),"risk":int(min(close[i+1:i+21])<=close[i]*.90),"id":prices[i][0].date().isoformat()} for i in range(20,len(close)-20)]
+    examples=[{"x":features(i),"up":int(close[i+1]>close[i]),"risk":int(min(close[i+1:i+21])<=close[i]*.90),"volatility":int(std(daily[i+1:i+21])>max(std(daily[i-19:i+1])*1.35,1e-6)),"id":prices[i][0].date().isoformat()} for i in range(20,len(close)-20)]
     cut=int(len(examples)*.8)
     # The stress label looks 20 sessions into the future. Leave a 20-row gap
     # at both chronological boundaries so those future labels cannot cross
@@ -302,8 +360,10 @@ def forecast_nasdaq(payload):
         return [{"x":[(v-center[j])/spread[j] for j,v in enumerate(o["x"])],"y":o[label],"id":o["id"]} for o in items]
     train_up,test_up=scaled(raw_fit,"up"),scaled(raw_test,"up")
     train_risk,test_risk=scaled(raw_fit,"risk"),scaled(raw_test,"risk")
+    train_vol,test_vol=scaled(raw_fit,"volatility"),scaled(raw_test,"volatility")
     valid_up=scaled(raw_validation,"up")
     valid_risk=scaled(raw_validation,"risk")
+    valid_vol=scaled(raw_validation,"volatility")
     def fit(data,epochs=55,label="direction",base=0.2,span=0.18,validation=None,patience=8):
         m={"w1":[[random.uniform(-.15,.15) for _ in range(9)] for _ in range(8)],"w2":[random.uniform(-.15,.15) for _ in range(9)]}
         logs=[];step=max(1,epochs//10);best_loss=float("inf");best_epoch=0;stale=0;best_model=None
@@ -323,12 +383,24 @@ def forecast_nasdaq(payload):
                 visible_status("training","%s neural network · epoch %d/%d"%(label,ep+1,epochs),base+span*(ep+1)/epochs,{"label":label,"epoch":ep+1,"epochs":epochs,"model":m,"sample":data[-1]["x"]})
             if validation and ep+1>=10 and stale>=patience: break
         return (best_model if validation else m),logs,best_epoch or epochs
-    random.seed(17)
+    def fit_ensemble(data,epochs=55,label="direction",base=0.2,span=0.18,validation=None):
+        seeds=(17,41,73); members=[]; best_epochs=[]; first_logs=[]
+        for index,seed in enumerate(seeds):
+            random.seed(seed)
+            member_data=[{**row,"x":row["x"].copy()} for row in data]
+            member_validation=[{**row,"x":row["x"].copy()} for row in validation] if validation else None
+            member_epochs=epochs[index] if isinstance(epochs,(list,tuple)) else epochs
+            model,logs,best_epoch=fit(member_data,epochs=member_epochs,label=label+" ensemble %d/3"%(index+1),base=base+span*index/3,span=span/3,validation=member_validation)
+            members.append(model); best_epochs.append(best_epoch)
+            if index==0: first_logs=logs
+        # Keep one representative topology for the weight visualizer; predictions average all three.
+        return {"members":members,"w1":members[0]["w1"],"w2":members[0]["w2"]},first_logs,best_epochs
     visible_status("preparing","Building chronological examples and normalizing eight price features.",0.08)
-    eval_up,logs,direction_best_epoch=fit(train_up,label="direction validation fit",base=0.12,span=0.16,validation=valid_up or None)
-    eval_risk,_,stress_best_epoch=fit(train_risk,label="drawdown-risk validation fit",base=0.28,span=0.16,validation=valid_risk or None)
+    eval_up,logs,direction_best_epochs=fit_ensemble(train_up,label="direction validation fit",base=0.12,span=0.16,validation=valid_up or None)
+    eval_risk,_,stress_best_epochs=fit_ensemble(train_risk,label="drawdown-risk validation fit",base=0.36,span=0.16,validation=valid_risk or None)
+    eval_vol,_,volatility_best_epochs=fit_ensemble(train_vol,label="volatility-regime validation fit",base=0.42,span=0.10,validation=valid_vol or None)
     stress_threshold,threshold_selection=choose_threshold_f2(eval_risk,valid_risk) if valid_risk else (0.5,{"f2":None,"validation_positive_rows":0})
-    up=evaluate(eval_up,test_up);risk=evaluate(eval_risk,test_risk,stress_threshold)
+    up=evaluate(eval_up,test_up);risk=evaluate(eval_risk,test_risk,stress_threshold);volatility=evaluate(eval_vol,test_vol)
     up_base=max(sum(o["y"] for o in test_up),len(test_up)-sum(o["y"] for o in test_up))/len(test_up)
     risk_base=max(sum(o["y"] for o in test_risk),len(test_risk)-sum(o["y"] for o in test_risk))/len(test_risk)
     direction_balanced=(up["recall"]+1-up["fpr"])/2
@@ -336,10 +408,11 @@ def forecast_nasdaq(payload):
     # Refit serving models with normalization from their full training history.
     full_mean=[sum(o["x"][j] for o in examples)/len(examples) for j in range(8)]
     full_scale=[math.sqrt(sum((o["x"][j]-full_mean[j])**2 for o in examples)/len(examples)) or 1 for j in range(8)]
-    full_up,_,_=fit(scaled(examples,"up",full_mean,full_scale),epochs=direction_best_epoch,label="direction final fit",base=0.47,span=0.20)
-    full_risk,_,_=fit(scaled(examples,"risk",full_mean,full_scale),epochs=stress_best_epoch,label="drawdown-risk final fit",base=0.68,span=0.20)
+    full_up,_,_=fit_ensemble(scaled(examples,"up",full_mean,full_scale),epochs=direction_best_epochs,label="direction final fit",base=0.52,span=0.12)
+    full_risk,_,_=fit_ensemble(scaled(examples,"risk",full_mean,full_scale),epochs=stress_best_epochs,label="drawdown-risk final fit",base=0.64,span=0.12)
+    full_vol,_,_=fit_ensemble(scaled(examples,"volatility",full_mean,full_scale),epochs=volatility_best_epochs,label="volatility-regime final fit",base=0.76,span=0.12)
     latest=[(v-full_mean[j])/full_scale[j] for j,v in enumerate(features(len(close)-1))]
-    p_up=predict(full_up,latest);p_risk=predict(full_risk,latest)
+    p_up=predict(full_up,latest);p_risk=predict(full_risk,latest);p_volatility=predict(full_vol,latest)
     if direction_balanced<=.52 or stress_balanced<=.52: signal="HOLD / NO EDGE DETECTED"
     elif p_up>=.55 and p_risk<.25: signal="BUY BIAS (RESEARCH)"
     elif p_up<=.45 or p_risk>=.35: signal="SELL / DEFENSIVE BIAS (RESEARCH)"
@@ -349,12 +422,13 @@ def forecast_nasdaq(payload):
         episode_count=sum(1 for e in event_rows if e["asset"]=="Nasdaq-100" and "drawdown" in e["event_type"])
     except OSError: episode_count=0
     model_dir=DATA_DIR/"models";model_dir.mkdir(exist_ok=True)
-    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"8 inputs → 8 tanh units → sigmoid","validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch}}
+    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"volatility_regime_model":full_vol,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"Three 8 → 8 → 1 neural-network ensembles (9 MLP members total)","ensemble_members":3,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs}}
     (model_dir/"nasdaq100_model.json").write_text(json.dumps(saved,indent=2),encoding="utf-8")
     MODEL=full_up
-    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; stress: >=10% drop within next 20 sessions","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental classifier output; not calibrated, not a trade instruction."}
+    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"volatility_regime_holdout_accuracy":volatility["accuracy"],"volatility_regime_balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"volatility_regime_baseline_accuracy":max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol),"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; 20-session 10% drawdown; elevated forward volatility relative to trailing volatility","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental ensemble outputs; not calibrated, not a trade instruction."}
     confusion=lambda counts:{"true_positive":counts["tp"],"false_positive":counts["fp"],"true_negative":counts["tn"],"false_negative":counts["fn"]}
-    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch},"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Validation-loss early stopping on a separate chronological block; final serving model refit with selected epoch counts.","limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."}
+    vol_base=max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol)
+    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"volatility_regime":{"holdout_accuracy":volatility["accuracy"],"majority_baseline_accuracy":vol_base,"balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"precision":volatility["precision"],"recall":volatility["recall"],"false_positive_rate":volatility["fpr"],"false_negative_rate":volatility["fnr"],"confusion":confusion(volatility["counts"]),"target":"next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"ensemble_members_per_task":3,"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Three independently seeded neural networks per task; ensemble predictions average member probabilities. Each member uses validation-loss early stopping and the final serving ensemble is refit using selected epoch counts.","limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation block to favor recall. Probabilities are not calibrated. Research output only."}
     (model_dir/"nasdaq100_training_report.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
     visible_status("complete","Forecast complete · signal %s · direction %.1f%% · stress risk %.1f%%"%(signal,p_up*100,p_risk*100),1,{"label":"direction forecast","epoch":55,"epochs":55,"model":full_up,"sample":latest})
     return NASDAQ_RESULT
@@ -430,9 +504,11 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 req=Request("http://127.0.0.1:11434/api/tags")
                 with urlopen(req,timeout=2) as response: tags=json.loads(response.read())
-                body=json.dumps({"connected":True,"models":[m.get("name","") for m in tags.get("models",[])]}).encode()
+                models=[m.get("name","") for m in tags.get("models",[])]
+                ready=OLLAMA_MODEL in models
+                body=json.dumps({"connected":True,"ready":ready,"required_model":OLLAMA_MODEL,"models":models,"message":("Ollama is ready." if ready else "Ollama is running, but "+OLLAMA_MODEL+" is not installed. Run: ollama pull "+OLLAMA_MODEL)}).encode()
             except Exception:
-                body=json.dumps({"connected":False,"models":[]}).encode()
+                body=json.dumps({"connected":False,"ready":False,"required_model":OLLAMA_MODEL,"models":[],"message":"Ollama is not running at 127.0.0.1:11434. Start the Ollama app, then check again."}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/status":
@@ -447,9 +523,14 @@ class Handler(SimpleHTTPRequestHandler):
             path=urlsplit(self.path).path
             if path=="/api/market-data/config":
                 key=str(payload.get("key","")).strip(); secret=str(payload.get("secret","")).strip()
-                if not key and not secret:
-                    MARKET_API_KEY=MARKET_API_SECRET=""; MARKET_CACHE={"at":0.0,"data":None}
-                    result={"connected":False,"configured":False,"message":"Market-data keys cleared from server memory."}
+                if payload.get("clear") is True:
+                    MARKET_API_KEY=MARKET_API_SECRET=""; MARKET_CACHE={"at":0.0,"data":None}; clear_market_credentials()
+                    result={"connected":False,"configured":False,"message":"Market-data credentials cleared from memory and the local encrypted store."}
+                elif not key and not secret:
+                    if not MARKET_API_KEY or not MARKET_API_SECRET: raise ValueError("Enter both Alpaca credentials first, or use Forget saved keys to remove stored credentials.")
+                    snapshot=fetch_market_snapshot(force=True)
+                    if not snapshot.get("connected"): raise ValueError(snapshot.get("error","Could not reconnect using the saved credentials."))
+                    result={"connected":True,"message":"Reconnected using credentials saved in the local encrypted store.","snapshot":snapshot}
                 elif not key or not secret or len(key)>256 or len(secret)>256:
                     raise ValueError("Enter both Alpaca key ID and secret.")
                 else:
@@ -461,7 +542,11 @@ class Handler(SimpleHTTPRequestHandler):
                         MARKET_API_KEY,MARKET_API_SECRET=old_key,old_secret
                         MARKET_CACHE={"at":0.0,"data":None}
                         raise ValueError(snapshot.get("error","Could not connect to the free Alpaca IEX feed."))
-                    result={"connected":True,"message":"Connected to the free Alpaca market-data feed.","snapshot":snapshot}
+                    try:
+                        save_market_credentials(key,secret)
+                        stored=True
+                    except (OSError,sqlite3.Error,ValueError): stored=False
+                    result={"connected":True,"message":("Connected. Credentials are saved encrypted on this Windows account." if stored else "Connected for this session, but secure local storage was unavailable; keys will be lost when the server stops."),"snapshot":snapshot}
             elif path=="/api/train": result=train(payload)
             elif path=="/api/scan": result=scan()
             elif path=="/api/agent": result=run_agent(payload)
