@@ -2,48 +2,52 @@
   "model_name": "MIRA \u2014 Market Insight & Risk Assistant",
   "instrument": "Nasdaq-100 (FRED/Nasdaq daily series)",
   "data_as_of": "2026-10-23",
-  "trained_on": "2026-10-25",
+  "trained_on": "2026-10-26",
   "signal": "HOLD / NO EDGE DETECTED",
-  "next_session_up_probability": 0.53989,
-  "next20_session_10pct_drawdown_risk": 0.03398,
+  "next_session_up_probability": 0.55659,
+  "next20_session_10pct_drawdown_risk": 0.0484,
   "direction": {
-    "holdout_accuracy": 0.5514885309907271,
+    "holdout_accuracy": 0.5583211322596389,
     "majority_baseline_accuracy": 0.5602733040507565,
-    "balanced_accuracy": 0.49896601530626056,
-    "precision": 0.5597287428273344,
-    "recall": 0.9346689895470384,
-    "false_positive_rate": 0.9367369589345172,
-    "false_negative_rate": 0.06533101045296168,
+    "balanced_accuracy": 0.4987354352693678,
+    "precision": 0.5596465390279823,
+    "recall": 0.9930313588850174,
+    "false_positive_rate": 0.9955604883462819,
+    "false_negative_rate": 0.006968641114982578,
     "confusion": {
-      "true_positive": 1073,
-      "false_positive": 844,
-      "true_negative": 57,
-      "false_negative": 75
+      "true_positive": 1140,
+      "false_positive": 897,
+      "true_negative": 4,
+      "false_negative": 8
     }
   },
   "stress": {
-    "holdout_accuracy": 0.20302586627623231,
+    "holdout_accuracy": 0.16349438750610054,
     "majority_baseline_accuracy": 0.91800878477306,
-    "balanced_accuracy": 0.549660135186451,
-    "precision": 0.09055338177752935,
-    "recall": 0.9642857142857143,
-    "false_positive_rate": 0.8649654439128124,
-    "false_negative_rate": 0.03571428571428571,
+    "balanced_accuracy": 0.5362601579706843,
+    "precision": 0.08795309168443496,
+    "recall": 0.9821428571428571,
+    "false_positive_rate": 0.9096225412014886,
+    "false_negative_rate": 0.017857142857142856,
     "confusion": {
-      "true_positive": 162,
-      "false_positive": 1627,
-      "true_negative": 254,
-      "false_negative": 6
+      "true_positive": 165,
+      "false_positive": 1711,
+      "true_negative": 170,
+      "false_negative": 3
     },
-    "decision_threshold": 0.03,
+    "decision_threshold": 0.02,
     "threshold_selection": "F2 on separate chronological validation block",
-    "validation_precision": 0.019891500904159132,
-    "validation_recall": 0.7857142857142857
+    "validation_precision": 0.0199203187250996,
+    "validation_recall": 0.8928571428571429
   },
   "train_rows": 6536,
   "validation_rows": 1619,
   "holdout_rows": 2049,
   "purged_boundary_rows": 20,
+  "validation_best_epochs": {
+    "direction": 2,
+    "stress": 13
+  },
   "features": [
     "1/2/5/10/20-session returns",
     "5/20-session volatility",
@@ -56,5 +60,6 @@
   "crash_event_counts": {
     "nasdaq100_daily_20pct_drawdowns": 8
   },
+  "training_method": "Validation-loss early stopping on a separate chronological block; final serving model refit with selected epoch counts.",
   "limitation": "One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."
 }

@@ -302,20 +302,31 @@ def forecast_nasdaq(payload):
         return [{"x":[(v-center[j])/spread[j] for j,v in enumerate(o["x"])],"y":o[label],"id":o["id"]} for o in items]
     train_up,test_up=scaled(raw_fit,"up"),scaled(raw_test,"up")
     train_risk,test_risk=scaled(raw_fit,"risk"),scaled(raw_test,"risk")
+    valid_up=scaled(raw_validation,"up")
     valid_risk=scaled(raw_validation,"risk")
-    def fit(data,epochs=55,label="direction",base=0.2,span=0.18):
+    def fit(data,epochs=55,label="direction",base=0.2,span=0.18,validation=None,patience=8):
         m={"w1":[[random.uniform(-.15,.15) for _ in range(9)] for _ in range(8)],"w2":[random.uniform(-.15,.15) for _ in range(9)]}
-        logs=[];step=max(1,epochs//10)
+        logs=[];step=max(1,epochs//10);best_loss=float("inf");best_epoch=0;stale=0;best_model=None
         for ep in range(epochs):
             random.shuffle(data);train_pass(m,data,.008/(1+ep*.01))
-            if ep%step==0 or ep==epochs-1:
-                logs.append({"epoch":ep+1,"loss":cross_entropy(m,data)})
+            train_loss=cross_entropy(m,data)
+            validation_loss=cross_entropy(m,validation) if validation else None
+            monitor_loss=validation_loss if validation else train_loss
+            if validation:
+                if monitor_loss<best_loss-1e-5:
+                    best_loss=monitor_loss;best_epoch=ep+1;stale=0
+                    best_model={"w1":[row.copy() for row in m["w1"]],"w2":m["w2"].copy()}
+                else: stale+=1
+            else: best_epoch=ep+1
+            if ep%step==0 or ep==epochs-1 or (validation and stale>=patience):
+                logs.append({"epoch":ep+1,"loss":train_loss,"validation_loss":validation_loss})
                 visible_status("training","%s neural network · epoch %d/%d"%(label,ep+1,epochs),base+span*(ep+1)/epochs,{"label":label,"epoch":ep+1,"epochs":epochs,"model":m,"sample":data[-1]["x"]})
-        return m,logs
+            if validation and ep+1>=10 and stale>=patience: break
+        return (best_model if validation else m),logs,best_epoch or epochs
     random.seed(17)
     visible_status("preparing","Building chronological examples and normalizing eight price features.",0.08)
-    eval_up,logs=fit(train_up,label="direction validation fit",base=0.12,span=0.16)
-    eval_risk,_=fit(train_risk,label="drawdown-risk validation fit",base=0.28,span=0.16)
+    eval_up,logs,direction_best_epoch=fit(train_up,label="direction validation fit",base=0.12,span=0.16,validation=valid_up or None)
+    eval_risk,_,stress_best_epoch=fit(train_risk,label="drawdown-risk validation fit",base=0.28,span=0.16,validation=valid_risk or None)
     stress_threshold,threshold_selection=choose_threshold_f2(eval_risk,valid_risk) if valid_risk else (0.5,{"f2":None,"validation_positive_rows":0})
     up=evaluate(eval_up,test_up);risk=evaluate(eval_risk,test_risk,stress_threshold)
     up_base=max(sum(o["y"] for o in test_up),len(test_up)-sum(o["y"] for o in test_up))/len(test_up)
@@ -325,8 +336,8 @@ def forecast_nasdaq(payload):
     # Refit serving models with normalization from their full training history.
     full_mean=[sum(o["x"][j] for o in examples)/len(examples) for j in range(8)]
     full_scale=[math.sqrt(sum((o["x"][j]-full_mean[j])**2 for o in examples)/len(examples)) or 1 for j in range(8)]
-    full_up,_=fit(scaled(examples,"up",full_mean,full_scale),label="direction final fit",base=0.47,span=0.20)
-    full_risk,_=fit(scaled(examples,"risk",full_mean,full_scale),label="drawdown-risk final fit",base=0.68,span=0.20)
+    full_up,_,_=fit(scaled(examples,"up",full_mean,full_scale),epochs=direction_best_epoch,label="direction final fit",base=0.47,span=0.20)
+    full_risk,_,_=fit(scaled(examples,"risk",full_mean,full_scale),epochs=stress_best_epoch,label="drawdown-risk final fit",base=0.68,span=0.20)
     latest=[(v-full_mean[j])/full_scale[j] for j,v in enumerate(features(len(close)-1))]
     p_up=predict(full_up,latest);p_risk=predict(full_risk,latest)
     if direction_balanced<=.52 or stress_balanced<=.52: signal="HOLD / NO EDGE DETECTED"
@@ -338,12 +349,12 @@ def forecast_nasdaq(payload):
         episode_count=sum(1 for e in event_rows if e["asset"]=="Nasdaq-100" and "drawdown" in e["event_type"])
     except OSError: episode_count=0
     model_dir=DATA_DIR/"models";model_dir.mkdir(exist_ok=True)
-    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"8 inputs → 8 tanh units → sigmoid"}
+    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"8 inputs → 8 tanh units → sigmoid","validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch}}
     (model_dir/"nasdaq100_model.json").write_text(json.dumps(saved,indent=2),encoding="utf-8")
     MODEL=full_up
-    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; stress: >=10% drop within next 20 sessions","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental classifier output; not calibrated, not a trade instruction."}
+    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; stress: >=10% drop within next 20 sessions","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental classifier output; not calibrated, not a trade instruction."}
     confusion=lambda counts:{"true_positive":counts["tp"],"false_positive":counts["fp"],"true_negative":counts["tn"],"false_negative":counts["fn"]}
-    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."}
+    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epoch,"stress":stress_best_epoch},"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Validation-loss early stopping on a separate chronological block; final serving model refit with selected epoch counts.","limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation period to favor recall. Probabilities are not calibrated. Research output only."}
     (model_dir/"nasdaq100_training_report.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
     visible_status("complete","Forecast complete · signal %s · direction %.1f%% · stress risk %.1f%%"%(signal,p_up*100,p_risk*100),1,{"label":"direction forecast","epoch":55,"epochs":55,"model":full_up,"sample":latest})
     return NASDAQ_RESULT
