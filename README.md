@@ -20,7 +20,7 @@ The **Live market data · QQQ** panel uses Alpaca Basic's free IEX feed for real
 
 QQQ is an ETF proxy for the Nasdaq-100. The live quote display is separate from the existing daily-trained neural forecast; connecting live quotes does not make that model an intraday or pre-market predictor. Nasdaq equities are not active all the time: the free overnight session operates five days a week and markets close on weekends and exchange holidays.
 
-The animated sphere is a visualization of network activity, not a literal brain scan. Forecast probabilities are uncalibrated. The latest chronological holdout did not beat a majority-class direction baseline. A recall-focused stress threshold catches more labeled events at the cost of many false alarms. MIRA reports that tradeoff; it does not promise 80% accuracy and should be treated as research only.
+The sphere renders the selected model’s actual learned weights and forward-pass activations as signed paths and signal pulses; it is a visualization, not a literal brain scan or a display of private chain-of-thought. Forecast probabilities are uncalibrated. The latest chronological holdout did not beat a majority-class direction baseline. A recall-focused stress threshold catches more labeled events at the cost of many false alarms. MIRA reports that tradeoff; it does not promise 80% accuracy and should be treated as research only.
 
 ## Local reasoning model
 
