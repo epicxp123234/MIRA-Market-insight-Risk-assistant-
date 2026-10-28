@@ -31,10 +31,7 @@ class _DataBlob(ctypes.Structure):
     _fields_=[("cbData",ctypes.c_uint32),("pbData",ctypes.POINTER(ctypes.c_ubyte))]
 
 def _dpapi(data, protect):
-    # FIXED: Bypasses Windows library calls on Render's Linux servers
-    if os.name != "nt": 
-        return data  # Safely returns the plain string/bytes on the cloud
-        
+    if os.name!="nt": return data  # cloud (Linux): no DPAPI; prefer ALPACA_API_KEY/ALPACA_API_SECRET env vars
     crypt=ctypes.WinDLL("Crypt32.dll",use_last_error=True); kernel=ctypes.WinDLL("Kernel32.dll",use_last_error=True)
     kernel.LocalFree.argtypes=[ctypes.c_void_p]; kernel.LocalFree.restype=ctypes.c_void_p
     source_buf=(ctypes.c_ubyte*len(data)).from_buffer_copy(data)
@@ -51,7 +48,6 @@ def _dpapi(data, protect):
     if not ok: raise ctypes.WinError(ctypes.get_last_error())
     try: return ctypes.string_at(output.pbData,output.cbData)
     finally: kernel.LocalFree(output.pbData)
-
 
 def save_market_credentials(key,secret):
     protected_key=_dpapi(key.encode("utf-8"),True); protected_secret=_dpapi(secret.encode("utf-8"),True)
@@ -1083,6 +1079,74 @@ def answer_decision(prompt):
     visible_status("complete","Answer ready: FINAL "+v["verdict"],1)
     return {"answer":answer,"summary":v,"actions":[{"tool":"neural_risk_brain","observation":{k:v.get(k) for k in ("verdict","confidence","horizon_label","as_of","risk_score","alarm_level","trend_verdict","interim")}}],"model":"MIRA neural risk brain (self-improving)"}
 
+# ---- Chat answers for every other question: built from MIRA's own saved results, so no Ollama is needed (works on a cloud server) ----
+OLLAMA_PROBE={"at":0.0,"ok":False}
+def ollama_up():
+    if time.time()-OLLAMA_PROBE["at"]<30: return OLLAMA_PROBE["ok"]
+    try:
+        with urlopen(Request("http://127.0.0.1:11434/api/tags"),timeout=1.5) as r: ok=OLLAMA_MODEL in [m.get("name","") for m in json.loads(r.read()).get("models",[])]
+    except Exception: ok=False
+    OLLAMA_PROBE.update({"at":time.time(),"ok":ok}); return ok
+
+def general_answer(prompt):
+    p=prompt.lower(); parts=[]; tools=[]
+    def has(*w): return any(x in p for x in w)
+    brain=brain_load(); sb=chart_scoreboard(brain) if brain and brain.get("eval") else {"available":False}
+    pc=lambda x: "n/a" if x is None else "%.1f%%"%(100*x)
+    if has("accura","correct","how good","right","perform","track record","reliab","trust","score","win rate","success"):
+        tools.append("scoreboard")
+        if sb.get("available"):
+            parts.append("On %s days the model had never seen, its BUY/SELL calls were right %s of the time. Simply saying BUY every day would have been right %s, so it does not beat that yet. Its risk ranking scores %.2f (0.50 is a coin flip). It warned before %s of the real 8%%+ drops, and %s of its alarms were followed by a drop (a drop happens %s of the time anyway)."%(sb["days"],pc(sb["call_accuracy"]),pc(sb["always_buy_accuracy"]),sb["auc"] or 0,pc(sb["drops_caught"]),pc(sb["alarm_precision"]),pc(sb["drop_base_rate"])))
+            if sb.get("strategy") and sb.get("buy_and_hold"): parts.append("Following its calls returned %s a year with a worst fall of %s; buy-and-hold returned %s a year with a worst fall of %s."%(pc(sb["strategy"]["cagr"]),pc(sb["strategy"]["max_drawdown"]),pc(sb["buy_and_hold"]["cagr"]),pc(sb["buy_and_hold"]["max_drawdown"])))
+        else: parts.append("The networks are still doing their first training, so there are no test results yet.")
+        lr=chart_live_record()
+        parts.append("Live record since this server began logging: %d calls, %d graded a month later (%d right)."%(lr["calls"],lr["month_graded"],lr["month_right"]))
+    elif has("false positive","false negative","holdout","evaluation","precision","recall"):
+        m=inspect_market_evaluation(); tools.append("inspect_market_evaluation")
+        if m.get("error") and sb.get("available"): parts.append("On %s unseen days the risk brain flagged %s of days as dangerous. %s of those alarms were false alarms (no 8%%+ drop followed), and it missed %s of the real drops (it caught %s)."%(sb["days"],pc(brain["holdout"].get("flagged_share")),pc(1-sb["alarm_precision"]),pc(1-sb["drops_caught"]),pc(sb["drops_caught"])))
+        elif m.get("error"): parts.append(m["error"])
+        else:
+            d=m.get("stress_drawdown",{})
+            parts.append("Saved evaluation on %s unseen rows (data to %s). Drop-risk task: it caught %s of real drops (recall), %s of its alerts were right (precision), false-positive rate %s, missed %s."%(m.get("holdout_rows"),m.get("as_of"),pc(d.get("recall")),pc(d.get("precision")),pc(d.get("false_positive_rate")),pc(d.get("false_negative_rate"))))
+            parts.append("Next-day direction: accuracy %s against a %s majority baseline, so there is no proven edge for predicting a single day."%(pc(m["direction"].get("holdout_accuracy")),pc(m["direction"].get("majority_baseline_accuracy"))))
+    elif has("learn","improv","retrain","train","self","better","update") and not has("hour","intraday","alpaca"):
+        tools.append("brain_status"); st=brain_status()
+        if st["trained"]:
+            parts.append("The neural risk brain was last trained on data through %s. About every 21 new trading days it trains challenger networks on all the newest data and replaces the current one only if it holds up on days it has not seen. Every call is also logged and graded a day and a month later."%st["trained_through"])
+            h=st.get("history") or []
+            if h: parts.append("Latest check: "+str(h[-1].get("event","training"))+" on "+str(h[-1].get("date"))+(", a retrained brain was promoted." if h[-1].get("promoted") else "."))
+        else: parts.append("The brain is training for the first time right now; ask again in a few minutes.")
+        if st["job"].get("running"): parts.append("A retraining job is running at the moment.")
+        parts.append("Your questions are logged for review but are never used to train the networks, so nobody can steer it by asking.")
+    elif has("data","fresh","live","real-time","realtime","current price","qqq","latest","how old","date"):
+        tools.append("price_data_note")
+        try: refresh_prices(False)
+        except Exception: pass
+        parts.append(price_data_note())
+        try:
+            L=fetch_market_snapshot()
+            if L.get("connected"): parts.append("QQQ is %s right now (%s, %s)."%("%.2f"%L["last"],L.get("session"),("%+.2f%% on the day"%(100*L["day_change_pct"])) if L.get("day_change_pct") is not None else "change unavailable"))
+            else: parts.append("Live quotes are off: "+str(L.get("error","connect Alpaca keys on the server.")))
+        except Exception: pass
+    elif has("hour","intraday","alpaca"):
+        tools.append("intraday")
+        parts.append((intraday_note(21) or "The hourly collector has not produced results yet.")+" Hourly price changes are saved and tested against the daily-only brain; they are used for predictions only if they improve the unseen-data score by a clear margin.")
+    elif has("risk","drawdown","crash","drop","fall","correction","danger","safe"):
+        tools.append("neural_risk_brain"); v=final_verdict("next month")
+        if v.get("interim"): parts.append("The brain is still training; the trend rule says %s for now."%v["trend_verdict"])
+        else: parts.append("The networks put the chance of a drop of 8%% or more within about a month at %s. Their alarm level is %s (SELL at or above it), so the call is %s. Drops of that size happened %s of the time historically."%(pc(v["risk_score"]),pc(v["alarm_level"]),v["verdict"],pc(sb.get("drop_base_rate"))))
+    elif has("how","work","what are you","what is","explain","neural","network","model","why","who"):
+        parts.append("I'm MIRA, a market research assistant. A small ensemble of neural networks, written in plain Python, reads 13 price-based signals from about 200 years of Nasdaq-100 and index history and estimates the chance of a drop of 8% or more in the next month. At or above its alarm level the call is SELL, otherwise BUY. A simple trend rule gives a second opinion. Each call is logged and graded later, and the networks retrain themselves on new data and only replace themselves if they prove better on unseen days.")
+        parts.append("I can't predict tomorrow's move reliably - nobody can - and I'm not financial advice.")
+    else:
+        try:
+            v=final_verdict("next month")
+            if not v.get("interim"): parts.append("Here is my current view: FINAL %s for the next month (%s confidence), drop risk %s against an alarm level of %s."%(v["verdict"],v["confidence"],pc(v["risk_score"]),pc(v["alarm_level"])))
+        except Exception: pass
+        parts.append("You can ask me things like: \"should I buy or sell today / this week / next year?\", \"how accurate are you?\", \"how do you learn?\", \"how fresh is your data?\", \"what is the drop risk?\" or \"how do you work?\".")
+    parts.append("Research only, not financial advice.")
+    return {"answer":" ".join(parts),"actions":[{"tool":t,"observation":{"source":"saved MIRA results"}} for t in tools],"model":"MIRA built-in answers"}
+
 def ollama_chat(messages):
     body=json.dumps({"model":OLLAMA_MODEL,"messages":messages,"tools":TOOLS,"stream":False,"think":False,"options":{"num_predict":128,"temperature":0.1}}).encode()
     req=Request("http://127.0.0.1:11434/api/chat",data=body,headers={"Content-Type":"application/json"})
@@ -1093,13 +1157,18 @@ def run_agent(payload):
     prompt=payload.get("prompt","").strip()
     if not prompt: raise ValueError("Enter a goal for the sandbox agent.")
     if is_decision_question(prompt): return answer_decision(prompt)
+    if not ollama_up():
+        visible_status("tool_call","MIRA is answering from its saved results.")
+        out=general_answer(prompt); log_question(prompt,"n/a"); visible_status("complete","Answer ready.",1); return out
     visible_status("interpreting","Reading your request and selecting from bounded local tools; private chain-of-thought is not exposed.")
     system=("You are the reasoning core of a local research agent. Understand the user's natural-language goal and use provided Python tools when useful. For ANY question about MIRA market forecast accuracy, market false-positive/false-negative rates, or market holdout metrics, you MUST call inspect_market_evaluation and use its returned values. Never use explore_simulation to answer a real market-model metric question. You may inspect the uploaded labeled dataset, train/evaluate the local neural predictor, inspect evaluation output, and explore the generated simulation when asked. Never claim to contact the internet, a real bank, a brokerage, or an exchange. Treat predictions as experiments, not financial advice. Give concise conclusions grounded in tool results. Do not reveal hidden chain-of-thought; report brief plans, actions, observations, and uncertainty.")
     messages=[{"role":"system","content":system},{"role":"user","content":prompt}]
     actions=[]
     for round_index in range(6):
         visible_status("reasoning","Local model is interpreting the request (round %d/6); internal chain-of-thought is private."%(round_index+1))
-        message=ollama_chat(messages)
+        try: message=ollama_chat(messages)
+        except Exception:
+            out=general_answer(prompt); visible_status("complete","Answer ready.",1); return out
         calls=message.get("tool_calls",[])
         if not calls:
             answer=message.get("content","") or "The local model returned no text."
@@ -1123,6 +1192,61 @@ def run_agent(payload):
     answer="Stopped after six tool rounds. Review the action log and narrow the goal if more work is needed."
     visible_status("complete","Agent finished the bounded task; answer and tool observations are in the dashboard.",1)
     return {"answer":answer,"actions":actions,"model":OLLAMA_MODEL}
+
+# ---- Live chart data for the /live page: candlesticks, the model's calls scored against what followed, and a live price ----
+CHART_CACHE={"at":0.0,"days":None,"data":None}
+
+def chart_daily_candles():
+    """Daily QQQ candles built from the saved hourly bars (empty until hourly data has been collected)."""
+    if not intraday_path().exists(): return {}
+    out={}
+    for d,rows in intraday_groups(intraday_load()).items():
+        rows=sorted(rows)
+        if len(rows)>=5: out[d]=[rows[0][1],max(r[2] for r in rows),min(r[3] for r in rows),rows[-1][4]]
+    return out
+
+def chart_replay(dates,closes,brain,days):
+    """The model's call on each recent day, made by the evaluation network that was trained BEFORE those days, then scored against what followed."""
+    n=len(closes); feats=brain_feature_rows(closes); ys=brain_labels(closes); ce=brain["eval"]; thr=brain["threshold"]
+    hold=brain_split(closes)[5]; first=max(hold[0] if hold else 0,n-days)
+    ids=[i for i in range(first,n) if feats[i] is not None]
+    probs=brain_predict_ids(brain_ensemble(ce["members"]),ce["mean"],ce["scale"],feats,ids); out=[]
+    for i in ids:
+        v="SELL" if probs[i]>=thr else "BUY"; y=ys[i]
+        out.append({"d":dates[i],"v":v,"p":round(probs[i],4),"o":None if y is None else int((v=="SELL")==bool(y))})
+    return out
+
+def chart_scoreboard(brain):
+    ho=brain.get("holdout") or {}; br=ho.get("base_rate"); fs=ho.get("flagged_share"); fd=ho.get("flagged_drop_rate"); cd=ho.get("calm_drop_rate")
+    if None in (br,fs,fd,cd): return {"available":False}
+    tp=fs*fd; tn=(1-fs)*(1-cd)
+    return {"available":True,"days":ho.get("rows"),"auc":ho.get("auc"),"call_accuracy":tp+tn,"always_buy_accuracy":1-br,"drops_caught":(tp/br) if br else None,"alarm_precision":fd,"drop_base_rate":br,"strategy":ho.get("strategy"),"buy_and_hold":ho.get("buy_and_hold"),"alarm_level":brain.get("threshold"),"trained_through":brain.get("trained_through")}
+
+def chart_live_record():
+    try: led=json.loads((LEARN_DIR/"ledger.json").read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): led=[]
+    m=[e for e in led if "dropped_8pct_21d" in e]; d=[e for e in led if "next_day_up" in e]
+    return {"calls":len(led),"month_graded":len(m),"month_right":sum(int((e["verdict"]=="SELL")==e["dropped_8pct_21d"]) for e in m),"month_always_buy_right":sum(int(not e["dropped_8pct_21d"]) for e in m),"day_graded":len(d),"day_right":sum(int((e["verdict"]=="BUY")==e["next_day_up"]) for e in d),"day_always_buy_right":sum(int(e["next_day_up"]) for e in d)}
+
+def chart_payload(days=180):
+    days=max(30,min(int(days),500)); now=time.time()
+    if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
+        try: refresh_prices(False)
+        except Exception: pass
+        dates,closes=load_price_series(); brain=brain_load(); candles=chart_daily_candles(); win=dates[-days:]
+        data={"as_of":dates[-1],"days":days,"dates":win,"closes":[round(c,2) for c in closes[-days:]],"candles":[{"d":d,"o":candles[d][0],"h":candles[d][1],"l":candles[d][2],"c":candles[d][3]} for d in win if d in candles],"data_note":price_data_note(),"live_record":chart_live_record()}
+        if brain is not None and brain.get("eval"):
+            data["replay"]=chart_replay(dates,closes,brain,days); data["scoreboard"]=chart_scoreboard(brain)
+        else: data["replay"]=[]; data["scoreboard"]={"available":False}
+        try:
+            v=final_verdict("next month")
+            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","agree","brain_job","as_of")}
+        except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
+        CHART_CACHE.update({"at":now,"days":days,"data":data})
+    out=dict(CHART_CACHE["data"])
+    try: out["live"]=fetch_market_snapshot()
+    except Exception as exc: out["live"]={"connected":False,"error":str(exc)[:100]}
+    return out
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*args,**kwargs):
@@ -1148,6 +1272,14 @@ class Handler(SimpleHTTPRequestHandler):
             body=json.dumps(brain_status()).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
+        if path=="/api/chart":
+            try:
+                q=dict(p.split("=",1) for p in urlsplit(self.path).query.split("&") if "=" in p)
+                body=json.dumps(chart_payload(int(q.get("days","180")))).encode()
+            except Exception as exc: body=json.dumps({"error":str(exc)}).encode()
+            self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+            return
+        if path=="/live": self.path="/live.html"
         if path=="/api/intraday":
             body=json.dumps({k:v for k,v in INTRADAY_STATE.items()}|{"profile":intraday_profile()}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
@@ -1220,12 +1352,6 @@ if __name__=="__main__":
         if brain_load() is None: print("No trained neural risk brain yet: training it in the background now (a few minutes)."); start_brain_job(False)
     except Exception as exc: print("Could not start brain training:",exc)
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
-    
-    # --- FIXED FOR RENDER COMPATIBILITY ---
-    # 1. Dynamically read Render's port environment variable, default to 8765 locally
-    port = int(os.environ.get("PORT", 8765))
-    
-    print(f"Python model server running 24/7 on port {port}")
-    
-    # 2. Changed host from "127.0.0.1" to "0.0.0.0" so the network router can bind correctly
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    port=int(os.environ.get("PORT",8765))
+    print(f"Python model server running on port {port}")
+    ThreadingHTTPServer(("0.0.0.0",port),Handler).serve_forever()
