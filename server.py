@@ -1216,5 +1216,5 @@ if __name__=="__main__":
         if brain_load() is None: print("No trained neural risk brain yet: training it in the background now (a few minutes)."); start_brain_job(False)
     except Exception as exc: print("Could not start brain training:",exc)
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
-    print("Python model server at http://127.0.0.1:8765")
+    print("Python model server at https://mira-market-insight-risk-assistant.onrender.com")
     ThreadingHTTPServer(("127.0.0.1",8765),Handler).serve_forever()

@@ -1,0 +1,1 @@
+{"status": "done", "tested_on": "2026-10-27", "days": 662, "holdout_days": 133, "holdout_from": "2022-09-02", "auc_daily_only": 0.41646191646191644, "auc_with_hourly": 0.4307944307944308, "difference": 0.014332514332514368, "verdict": "no clear gain"}
