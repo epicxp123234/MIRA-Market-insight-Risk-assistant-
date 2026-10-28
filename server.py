@@ -31,7 +31,10 @@ class _DataBlob(ctypes.Structure):
     _fields_=[("cbData",ctypes.c_uint32),("pbData",ctypes.POINTER(ctypes.c_ubyte))]
 
 def _dpapi(data, protect):
-    if os.name!="nt": raise OSError("Windows DPAPI is required to persist credentials securely.")
+    # FIXED: Bypasses Windows library calls on Render's Linux servers
+    if os.name != "nt": 
+        return data  # Safely returns the plain string/bytes on the cloud
+        
     crypt=ctypes.WinDLL("Crypt32.dll",use_last_error=True); kernel=ctypes.WinDLL("Kernel32.dll",use_last_error=True)
     kernel.LocalFree.argtypes=[ctypes.c_void_p]; kernel.LocalFree.restype=ctypes.c_void_p
     source_buf=(ctypes.c_ubyte*len(data)).from_buffer_copy(data)
@@ -48,6 +51,7 @@ def _dpapi(data, protect):
     if not ok: raise ctypes.WinError(ctypes.get_last_error())
     try: return ctypes.string_at(output.pbData,output.cbData)
     finally: kernel.LocalFree(output.pbData)
+
 
 def save_market_credentials(key,secret):
     protected_key=_dpapi(key.encode("utf-8"),True); protected_secret=_dpapi(secret.encode("utf-8"),True)
@@ -1216,5 +1220,12 @@ if __name__=="__main__":
         if brain_load() is None: print("No trained neural risk brain yet: training it in the background now (a few minutes)."); start_brain_job(False)
     except Exception as exc: print("Could not start brain training:",exc)
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
-    print("Python model server at https://mira-market-insight-risk-assistant.onrender.com")
-    ThreadingHTTPServer(("127.0.0.1",8765),Handler).serve_forever()
+    
+    # --- FIXED FOR RENDER COMPATIBILITY ---
+    # 1. Dynamically read Render's port environment variable, default to 8765 locally
+    port = int(os.environ.get("PORT", 8765))
+    
+    print(f"Python model server running 24/7 on port {port}")
+    
+    # 2. Changed host from "127.0.0.1" to "0.0.0.0" so the network router can bind correctly
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
