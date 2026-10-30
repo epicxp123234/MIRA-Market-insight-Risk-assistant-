@@ -677,7 +677,7 @@ def intraday_profile(bars=None):
 
 def intraday_ab_test(dates,closes):
     """Same days, same split, same networks: daily features only versus daily plus hourly features. Scored on days neither has seen."""
-    extra=intraday_features(); base=brain_feature_rows(closes); ys=brain_labels(closes)
+    extra=intraday_features(); full=brain_feature_rows(dates,closes); base=[select_features(r,BRAIN_FEATURES) if r is not None else None for r in full]; ys=brain_labels(closes)
     rows=[i for i in range(len(closes)) if base[i] is not None and ys[i] is not None and dates[i] in extra]
     if len(rows)<600: return {"status":"waiting","days":len(rows),"message":"Hourly history covers %d usable days so far; the test needs 600."%len(rows)}
     n=len(rows); a=int(n*.6); b=int(n*.8); fit,val,hold=rows[:a-BRAIN_GAP],rows[a:b-BRAIN_GAP],rows[b:]; auc={}
@@ -804,11 +804,13 @@ def explain_graded_call(e,dates,closes,brain):
         out["dropped_8pct_21d"]=e["dropped_8pct_21d"]
         out["correct"]=(e["verdict"]=="SELL")==e["dropped_8pct_21d"]
     if brain and brain.get("eval"):
-        feats=brain_feature_rows(closes)
-        if i<len(feats) and feats[i] is not None:
+        names=brain.get("features",BRAIN_FEATURES)
+        full=brain_feature_rows(dates,closes)
+        if i<len(full) and full[i] is not None:
+            row=select_features(full[i],names)
             mean,scale=brain["eval"]["mean"],brain["eval"]["scale"]
-            z=[(feats[i][j]-mean[j])/(scale[j] or 1) for j in range(len(BRAIN_FEATURES))]
-            ranked=sorted(zip(BRAIN_FEATURES,feats[i],z),key=lambda t:-abs(t[2]))[:3]
+            z=[(row[j]-mean[j])/(scale[j] or 1) for j in range(len(names))]
+            ranked=sorted(zip(names,row,z),key=lambda t:-abs(t[2]))[:3]
             out["most_unusual_inputs"]=[{"feature":n,"value":round(v,4),"how_unusual":round(abs(zz),1)} for n,v,zz in ranked]
     parts=["On %s the call was %s, with a drop-risk score of %s against an alarm level of %s."%(out["as_of"],out["verdict"],("%.0f%%"%(100*out["risk_score"])) if out.get("risk_score") is not None else "n/a",("%.0f%%"%(100*out["alarm_level"])) if out.get("alarm_level") is not None else "n/a")]
     if "actual_move_pct" in out and out["actual_move_pct"] is not None:
@@ -989,6 +991,63 @@ import threading
 BRAIN_FEATURES=["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","return_60d","volatility_60d","vs_50day_avg","vs_250day_avg","below_252d_high","vol_5_vs_60"]
 BRAIN_HORIZON=21; BRAIN_DROP=0.08; BRAIN_WARMUP=252; BRAIN_GAP=21
 BRAIN_SEEDS=(17,41,73); BRAIN_HIDDEN_CHOICES=(8,12,6)
+MACRO_FEATURES=["yield_10y_chg_20d","credit_spread_level","recession_flag"]
+ALL_FEATURES=BRAIN_FEATURES+MACRO_FEATURES
+FEATURE_INDEX={name:i for i,name in enumerate(ALL_FEATURES)}
+
+def select_features(row,names):
+    """Picks out a candidate's own chosen inputs, in its own order, from the full feature row."""
+    return [row[FEATURE_INDEX[n]] for n in names]
+
+# ---- Macro/fundamental data (free, from FRED): 10-year Treasury yield, high-yield credit spread, NBER recession flag.
+# Real new information for the networks, beyond price alone - fetched the same safe, read-only way as the price history.
+import bisect
+MACRO_SERIES_IDS={"yield_10y":"DGS10","credit_spread":"BAMLH0A0HYM2","recession":"USREC"}
+MACRO_CACHE={"at":0.0,"series":{},"errors":{}}
+
+def _fred_series(series_id,cosd="1985-01-01"):
+    req=Request("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=%s"%(series_id,cosd),headers={"User-Agent":"MIRA-research/1.0"})
+    last_exc=None
+    for attempt in range(3):
+        try:
+            with urlopen(req,timeout=25) as response: text=response.read().decode("utf-8-sig")
+            break
+        except Exception as exc: last_exc=exc; time.sleep(2*(attempt+1))
+    else: raise last_exc
+    out=[]; reader=csv.reader(io.StringIO(text)); next(reader,None)
+    for rec in reader:
+        if len(rec)<2: continue
+        try: d=parse_date(rec[0]).date().isoformat(); v=float(rec[1])
+        except (ValueError,TypeError): continue
+        if math.isfinite(v): out.append((d,v))
+    out.sort()
+    return [d for d,_ in out],[v for _,v in out]
+
+def refresh_macro(force=False):
+    """Best-effort, cached for hours since these move slowly. Any feature using this data defaults to neutral if it is not available yet, so nothing breaks without it."""
+    if not force and time.time()-MACRO_CACHE["at"]<21600: return MACRO_CACHE
+    MACRO_CACHE["at"]=time.time()
+    for name,sid in MACRO_SERIES_IDS.items():
+        try: MACRO_CACHE["series"][name]=_fred_series(sid)
+        except Exception as exc: MACRO_CACHE["errors"][name]=str(exc)[:100]
+    return MACRO_CACHE
+
+def _macro_value_on(name,d,default):
+    ser=MACRO_CACHE["series"].get(name)
+    if not ser or not ser[0]: return default
+    dates,vals=ser; i=bisect.bisect_right(dates,d)-1
+    return vals[i] if i>=0 else default
+
+def macro_row(d):
+    """Three macro inputs as of date d: how much the 10-year yield has moved in ~20 trading days, the current high-yield credit spread, and whether the US was officially in an NBER recession that month. Neutral (0.0) wherever data isn't available yet."""
+    y_now=_macro_value_on("yield_10y",d,None)
+    d_back=(date.fromisoformat(d)-timedelta(days=28)).isoformat()
+    y_then=_macro_value_on("yield_10y",d_back,y_now)
+    yield_chg=(y_now-y_then) if (y_now is not None and y_then is not None) else 0.0
+    credit=_macro_value_on("credit_spread",d,0.0)
+    rec=_macro_value_on("recession",d,0.0)
+    return [yield_chg,credit,1.0 if rec>=0.5 else 0.0]
+
 BRAIN_JOB={"running":False,"message":"","error":None,"started":None}
 BRAIN_LOCK=threading.Lock()
 
@@ -998,7 +1057,8 @@ def brain_load():
     try: return json.loads(brain_path().read_text(encoding="utf-8"))
     except (OSError,json.JSONDecodeError): return None
 
-def brain_feature_rows(closes):
+def brain_feature_rows(dates,closes):
+    """Returns the full 16-wide feature row (13 price-based + 3 macro) for every day; None wherever there isn't enough price history yet. A model only ever sees the subset named in its own "features" list - see select_features()."""
     n=len(closes); daily=[0.0]+[closes[i]/closes[i-1]-1 for i in range(1,n)]
     cs=[0.0]
     for v in closes: cs.append(cs[-1]+v)
@@ -1007,7 +1067,7 @@ def brain_feature_rows(closes):
     rows=[None]*n
     for i in range(BRAIN_WARMUP,n):
         v5,v20,v60=sd(i,5),sd(i,20),sd(i,60)
-        rows[i]=[daily[i],closes[i]/closes[i-2]-1,closes[i]/closes[i-5]-1,closes[i]/closes[i-10]-1,closes[i]/closes[i-20]-1,v5,v20,closes[i]/closes[i-60]-1,v60,closes[i]/((cs[i+1]-cs[i-49])/50)-1,closes[i]/((cs[i+1]-cs[i-249])/250)-1,closes[i]/max(closes[i-251:i+1])-1,(v5/v60) if v60>0 else 1.0]
+        rows[i]=[daily[i],closes[i]/closes[i-2]-1,closes[i]/closes[i-5]-1,closes[i]/closes[i-10]-1,closes[i]/closes[i-20]-1,v5,v20,closes[i]/closes[i-60]-1,v60,closes[i]/((cs[i+1]-cs[i-49])/50)-1,closes[i]/((cs[i+1]-cs[i-249])/250)-1,closes[i]/max(closes[i-251:i+1])-1,(v5/v60) if v60>0 else 1.0]+macro_row(dates[i])
     return rows
 
 def brain_labels(closes):
@@ -1055,8 +1115,8 @@ def brain_predict_ids(model,mean,scale,feats,ids):
 
 def brain_ensemble(members): return {"members":members,"w1":members[0]["w1"],"w2":members[0]["w2"]}
 
-def brain_split(closes):
-    feats=brain_feature_rows(closes); ys=brain_labels(closes)
+def brain_split(dates,closes):
+    feats=brain_feature_rows(dates,closes); ys=brain_labels(closes)
     idx=[i for i in range(len(closes)) if feats[i] is not None and ys[i] is not None]
     m=len(idx); a=int(m*.6); b=int(m*.8)
     return feats,ys,idx,idx[:max(50,a-BRAIN_GAP)],idx[a:max(a+50,b-BRAIN_GAP)],idx[b:]
@@ -1076,9 +1136,11 @@ def brain_labels_cache(closes):
     if key not in _LABEL_CACHE: _LABEL_CACHE.clear(); _LABEL_CACHE[key]=brain_labels(closes)
     return _LABEL_CACHE[key]
 
-def train_brain(dates,closes,hidden=8):
-    visible_status("preparing","Neural risk brain: building 13 price features and 21-day risk labels.",0.02)
-    feats,ys,idx,fit_ids,val_ids,hold_ids=brain_split(closes)
+def train_brain(dates,closes,hidden=8,feature_names=None):
+    feature_names=feature_names or BRAIN_FEATURES
+    visible_status("preparing","Neural risk brain: building %d features (%s) and 21-day risk labels."%(len(feature_names),"price-only" if feature_names==BRAIN_FEATURES else "price + macro"),0.02)
+    full,ys,idx,fit_ids,val_ids,hold_ids=brain_split(dates,closes)
+    feats=[select_features(r,feature_names) if r is not None else None for r in full]
     mean,scale=brain_stats([feats[i] for i in fit_ids])
     fit=brain_scaled(feats,ys,fit_ids,mean,scale); val=brain_scaled(feats,ys,val_ids,mean,scale)
     members=[]; epochs=[]
@@ -1100,10 +1162,10 @@ def train_brain(dates,closes,hidden=8):
     s_mean,s_scale=brain_stats([feats[i] for i in idx]); allrows=brain_scaled(feats,ys,idx,s_mean,s_scale); serving=[]
     for k,seed in enumerate(BRAIN_SEEDS):
         mem,_=brain_fit_member(allrows,None,seed,hidden,max(8,epochs[k]),"Risk brain final fit %d/3"%(k+1),0.28+0.1*k/3,0.1/3); serving.append(mem)
-    return {"version":2,"created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":BRAIN_FEATURES,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"holdout":holdout,"history":[]}
+    return {"version":2,"created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":feature_names,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"holdout":holdout,"history":[]}
 
-def brain_risk_now(brain,closes):
-    x=brain_feature_rows(closes)[-1]
+def brain_risk_now(brain,dates,closes):
+    x=select_features(brain_feature_rows(dates,closes)[-1],brain.get("features",BRAIN_FEATURES))
     return predict(brain_ensemble(brain["members"]),[(v-brain["mean"][j])/brain["scale"][j] for j,v in enumerate(x)])
 
 def brain_save(brain):
@@ -1122,12 +1184,19 @@ def brain_job(force=False):
         else:
             BRAIN_JOB["message"]="Self-improvement: training challengers on newer data..."
             order=list(BRAIN_HIDDEN_CHOICES); alt=order[(order.index(champ["hidden"])+1)%len(order)] if champ["hidden"] in order else 12
-            feats,ys,idx,_,_,hold_ids=brain_split(closes)
+            full,ys,idx,_,_,hold_ids=brain_split(dates,closes)
+            feats=[select_features(r,champ.get("features",BRAIN_FEATURES)) if r is not None else None for r in full]
             ce=champ["eval"]; p_champ=brain_predict_ids(brain_ensemble(ce["members"]),ce["mean"],ce["scale"],feats,hold_ids)
             yh=[ys[i] for i in hold_ids]; champ_auc=auc_score([p_champ[i] for i in hold_ids],yh)
+            champ_features=champ.get("features",BRAIN_FEATURES)
+            try: refresh_macro()
+            except Exception: pass
+            candidates=[(champ["hidden"],"refresh on newer data",-0.015,champ_features),(alt,"alternative size (%d hidden units)"%alt,0.01,champ_features)]
+            if champ_features!=ALL_FEATURES and MACRO_CACHE.get("series"):
+                candidates.append((champ["hidden"],"with macro features (10-year yield change, credit spread, recession flag)",0.01,ALL_FEATURES))
             results=[]
-            for hidden,kind,tol in ((champ["hidden"],"refresh on newer data",-0.015),(alt,"alternative size (%d hidden units)"%alt,0.01)):
-                cand=train_brain(dates,closes,hidden); results.append((cand,kind,tol,cand["holdout"]["auc"]))
+            for hidden,kind,tol,feature_names in candidates:
+                cand=train_brain(dates,closes,hidden,feature_names); results.append((cand,kind,tol,cand["holdout"]["auc"]))
             note=[]; winner=None; win_auc=-1
             for cand,kind,tol,auc in results:
                 ok=(auc is not None and champ_auc is not None and auc>=champ_auc+tol)
@@ -1171,7 +1240,7 @@ def final_verdict(prompt=""):
     if brain is None:
         started=start_brain_job(False)
         out.update({"verdict":trend_verdict,"confidence":"Low","interim":True,"brain_job":started["message"]}); return out
-    p=brain_risk_now(brain,closes); thr=brain["threshold"]; brain_verdict="SELL" if p>=thr else "BUY"
+    p=brain_risk_now(brain,dates,closes); thr=brain["threshold"]; brain_verdict="SELL" if p>=thr else "BUY"
     margin=((p-thr)/thr) if brain_verdict=="SELL" else ((thr-p)/thr)
     level=2 if margin>=0.5 else (1 if margin>=0.2 else 0)
     agree=(brain_verdict==trend_verdict)
@@ -1329,6 +1398,7 @@ def mira_facts():
             lines.append("Unseen-data test (%s days): BUY/SELL calls right %.1f%%; always-BUY would be right %.1f%%; risk-ranking AUC %.2f; caught %.0f%% of real 8%%+ drops; %.0f%% of alarms followed by a drop (base rate %.0f%%)."%(sb["days"],100*sb["call_accuracy"],100*sb["always_buy_accuracy"],sb["auc"] or 0,100*(sb["drops_caught"] or 0),100*sb["alarm_precision"],100*sb["drop_base_rate"]))
             if sb.get("strategy"): lines.append("Following its calls: %.1f%%/yr, worst fall %.0f%%; buy-and-hold: %.1f%%/yr, worst fall %.0f%%."%(100*sb["strategy"]["cagr"],100*sb["strategy"]["max_drawdown"],100*sb["buy_and_hold"]["cagr"],100*sb["buy_and_hold"]["max_drawdown"]))
         lines.append("Brain trained through %s."%brain.get("trained_through"))
+        lines.append("Inputs used: %s."%("13 price-based features only" if brain.get("features",BRAIN_FEATURES)==BRAIN_FEATURES else "13 price-based features plus 3 macro features (10-year Treasury yield change, high-yield credit spread, recession flag)"))
     try:
         v=final_verdict("next month")
         if not v.get("interim"): lines.append("Current call (next month): %s, confidence %s, drop risk %.1f%% vs alarm %.1f%%, trend rule %s, data as of %s."%(v["verdict"],v["confidence"],100*v["risk_score"],100*v["alarm_level"],v["trend_verdict"],v["as_of"]))
@@ -1453,8 +1523,10 @@ def chart_daily_candles():
 
 def chart_replay(dates,closes,brain,days):
     """The model's call on each recent day, made by the evaluation network that was trained BEFORE those days, then scored against what followed."""
-    n=len(closes); feats=brain_feature_rows(closes); ys=brain_labels(closes); ce=brain["eval"]; thr=brain["threshold"]
-    hold=brain_split(closes)[5]; first=max(hold[0] if hold else 0,n-days)
+    n=len(closes); names=brain.get("features",BRAIN_FEATURES)
+    full=brain_feature_rows(dates,closes); feats=[select_features(r,names) if r is not None else None for r in full]
+    ys=brain_labels(closes); ce=brain["eval"]; thr=brain["threshold"]
+    hold=brain_split(dates,closes)[5]; first=max(hold[0] if hold else 0,n-days)
     ids=[i for i in range(first,n) if feats[i] is not None]
     probs=brain_predict_ids(brain_ensemble(ce["members"]),ce["mean"],ce["scale"],feats,ids); out=[]
     for i in ids:
@@ -1617,6 +1689,9 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=="/api/paper-trade/sync": result=paper_sync_to_verdict()
             else: self.send_error(404); return
             body=json.dumps(result).encode(); code=200
+        except PermissionError as exc:
+            # Blocked owner-only action from a public visitor: tell that visitor, but never touch the shared live-status seen by everyone.
+            body=json.dumps({"error":str(exc)}).encode(); code=403
         except Exception as exc:
             visible_status("error",str(exc),0.0)
             body=json.dumps({"error":str(exc)}).encode(); code=400
