@@ -735,6 +735,7 @@ def paper_state():
     except (OSError,json.JSONDecodeError): st={"enabled":False}
     st.setdefault("trade_pct",PAPER_TARGET_PCT)   # fraction of paper equity to put into QQQ on a BUY call - owner-set, asked for once in the UI, not guessed
     st.setdefault("take_profit_pct",None)         # e.g. 0.05 = sell everything the moment unrealized profit on the open position hits 5%, regardless of what the model's own call says
+    st.setdefault("stop_loss_pct",None)           # e.g. 0.04 = sell everything the moment an open position is DOWN 4%, to cap the loss instead of riding it out until the model's call flips
     return st
 
 def paper_set_enabled(on):
@@ -742,13 +743,15 @@ def paper_set_enabled(on):
     st=paper_state(); st["enabled"]=bool(on); st["changed_at"]=datetime.now().isoformat(timespec="seconds")
     paper_state_path().write_text(json.dumps(st),encoding="utf-8")
 
-def paper_set_config(trade_pct=None,take_profit_pct=None):
-    """Owner sets how much of the paper account each BUY call uses, and (optionally) an automatic take-profit %. Both are informational settings the owner picks - the networks never see or react to them."""
+def paper_set_config(trade_pct=None,take_profit_pct=None,stop_loss_pct=None):
+    """Owner sets how much of the paper account each BUY call uses, and (optionally) automatic take-profit / stop-loss %s. These are informational settings the owner picks - the networks never see or react to them."""
     st=paper_state()
     if trade_pct is not None:
         tp=max(0.05,min(1.0,float(trade_pct))); st["trade_pct"]=tp
     if take_profit_pct is not None:
         st["take_profit_pct"]=(max(0.005,min(1.0,float(take_profit_pct))) if float(take_profit_pct)>0 else None)
+    if stop_loss_pct is not None:
+        st["stop_loss_pct"]=(max(0.005,min(1.0,float(stop_loss_pct))) if float(stop_loss_pct)>0 else None)
     paper_state_path().write_text(json.dumps(st),encoding="utf-8")
     return paper_summary()
 
@@ -795,25 +798,28 @@ def paper_sync_to_verdict(v=None):
     return result
 
 def paper_check_take_profit():
-    """Runs on its own, independent of the daily model call: if the owner set a take-profit %, sell the whole position the moment it's reached, to actually lock the profit in instead of waiting for the next model verdict."""
+    """Runs on its own, independent of the daily model call: if the owner set a take-profit and/or stop-loss %, sell the whole position the moment either is hit - locking in a gain or capping a loss - instead of waiting (possibly weeks) for the model's own call to flip."""
     st=paper_state()
     if not st.get("enabled"): return {"skipped":"paper trading is off"}
-    target=st.get("take_profit_pct")
-    if not target: return {"skipped":"no take-profit target set"}
+    tp_target=st.get("take_profit_pct"); sl_target=st.get("stop_loss_pct")
+    if not tp_target and not sl_target: return {"skipped":"no take-profit or stop-loss set - position will only change when the model's own call flips"}
     try:
         pos=paper_position()
         if not pos or float(pos.get("qty",0))<=0: return {"skipped":"no open position"}
         plpc=float(pos.get("unrealized_plpc",0) or 0)
-        if plpc<target: return {"skipped":"at %.2f%%, target is %.2f%%"%(plpc*100,target*100)}
+        hit=None
+        if tp_target and plpc>=tp_target: hit=("TAKE_PROFIT_SELL","reached %.2f%% profit (target was %.2f%%) - sold to lock it in"%(plpc*100,tp_target*100))
+        elif sl_target and plpc<=-sl_target: hit=("STOP_LOSS_SELL","down %.2f%% (stop-loss was %.2f%%) - sold to cap the loss, this does not guarantee no loss, only limits it"%(plpc*100,sl_target*100))
+        if not hit: return {"skipped":"at %.2f%% (take-profit %s, stop-loss %s)"%(plpc*100,("%.2f%%"%(tp_target*100)) if tp_target else "off",("-%.2f%%"%(sl_target*100)) if sl_target else "off")}
         order=paper_request("POST","/v2/orders",{"symbol":PAPER_SYMBOL,"qty":pos.get("qty"),"side":"sell","type":"market","time_in_force":"day"})
-        result={"as_of":datetime.now().isoformat(timespec="seconds"),"verdict":"TAKE_PROFIT_SELL","reason":"reached %.2f%% profit (target was %.2f%%) - sold to lock it in, independent of the model's own call"%(plpc*100,target*100),"order":order}
+        result={"as_of":datetime.now().isoformat(timespec="seconds"),"verdict":hit[0],"reason":hit[1]+", independent of the model's own call","order":order}
         if order: paper_log(result)
         return result
     except ValueError as exc: return {"error":str(exc)}
 
 def paper_summary():
     st=paper_state()
-    out={"enabled":st.get("enabled",False),"symbol":PAPER_SYMBOL,"trade_pct":st.get("trade_pct",PAPER_TARGET_PCT),"take_profit_pct":st.get("take_profit_pct"),"endpoint":"Alpaca PAPER (simulated money only)"}
+    out={"enabled":st.get("enabled",False),"symbol":PAPER_SYMBOL,"trade_pct":st.get("trade_pct",PAPER_TARGET_PCT),"take_profit_pct":st.get("take_profit_pct"),"stop_loss_pct":st.get("stop_loss_pct"),"endpoint":"Alpaca PAPER (simulated money only)"}
     if not (MARKET_API_KEY and MARKET_API_SECRET): out["error"]="Connect your free Alpaca keys first."; return out
     try:
         acct=paper_account()
@@ -907,9 +913,15 @@ def price_updater_loop():
     while True:
         try: refresh_prices(force=True); autopilot_once()
         except Exception as exc: AUTOPILOT["note"]="Autopilot error: "+str(exc)[:100]
-        try: paper_check_take_profit()   # checked every cycle, not just once a day, so a profit target is actually caught when it happens
-        except Exception: pass
         time.sleep(300 if market_session()=="regular session" else 1800)
+
+def paper_watch_loop():
+    """Separate, fast loop just for the take-profit/stop-loss check: it only reads your Alpaca PAPER position (already live-marked by Alpaca itself), so it's cheap enough to run every few seconds instead of waiting on the heavier daily-data refresh above. This is what actually catches a fast intraday move - a crash in one minute doesn't have to wait on the 5-minute cycle."""
+    while True:
+        gap=5 if market_session()=="regular session" else 60   # every 5s while the market's open, every 60s otherwise (nothing fills outside market hours anyway)
+        try: paper_check_take_profit()
+        except Exception: pass
+        time.sleep(gap)
 
 def trend_positions(closes,n,band):
     """1 = invested (BUY), 0 = defensive (SELL). Switches only when price is clearly beyond the band around its n-day average."""
@@ -1748,7 +1760,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=="/api/nasdaq": result=forecast_nasdaq(payload)
             elif path=="/api/brain": result=start_brain_job(force=bool(payload.get("force",True)))
             elif path=="/api/paper-trade/toggle": paper_set_enabled(bool(payload.get("enabled"))); result=paper_summary()
-            elif path=="/api/paper-trade/config": result=paper_set_config(payload.get("trade_pct"),payload.get("take_profit_pct"))
+            elif path=="/api/paper-trade/config": result=paper_set_config(payload.get("trade_pct"),payload.get("take_profit_pct"),payload.get("stop_loss_pct"))
             elif path=="/api/target": result=target_set(payload.get("pct"),payload.get("by_date",""),payload.get("note",""))
             elif path=="/api/paper-trade/sync": result=paper_sync_to_verdict()
             else: self.send_error(404); return
@@ -1777,6 +1789,7 @@ if __name__=="__main__":
         if brain_load() is None: print("No trained neural risk brain yet: training it in the background now (a few minutes)."); start_brain_job(False)
     except Exception as exc: print("Could not start brain training:",exc)
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
+    threading.Thread(target=paper_watch_loop,daemon=True).start(); print("Paper take-profit/stop-loss watcher started: checks every 5 seconds while the market is open.")
     def keepalive_loop():
         # Free cloud hosts put idle servers to sleep, which stops learning. Visiting our own public address every 10 minutes keeps it awake.
         url=os.environ.get("RENDER_EXTERNAL_URL","").rstrip("/")
