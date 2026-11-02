@@ -731,12 +731,26 @@ TRADE_LOG=LEARN_DIR/"paper_trades.json"
 def paper_state_path(): return LEARN_DIR/"paper_trading.json"
 
 def paper_state():
-    try: return json.loads(paper_state_path().read_text(encoding="utf-8"))
-    except (OSError,json.JSONDecodeError): return {"enabled":False}
+    try: st=json.loads(paper_state_path().read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): st={"enabled":False}
+    st.setdefault("trade_pct",PAPER_TARGET_PCT)   # fraction of paper equity to put into QQQ on a BUY call - owner-set, asked for once in the UI, not guessed
+    st.setdefault("take_profit_pct",None)         # e.g. 0.05 = sell everything the moment unrealized profit on the open position hits 5%, regardless of what the model's own call says
+    return st
 
 def paper_set_enabled(on):
     LEARN_DIR.mkdir(parents=True,exist_ok=True)
-    paper_state_path().write_text(json.dumps({"enabled":bool(on),"changed_at":datetime.now().isoformat(timespec="seconds")}),encoding="utf-8")
+    st=paper_state(); st["enabled"]=bool(on); st["changed_at"]=datetime.now().isoformat(timespec="seconds")
+    paper_state_path().write_text(json.dumps(st),encoding="utf-8")
+
+def paper_set_config(trade_pct=None,take_profit_pct=None):
+    """Owner sets how much of the paper account each BUY call uses, and (optionally) an automatic take-profit %. Both are informational settings the owner picks - the networks never see or react to them."""
+    st=paper_state()
+    if trade_pct is not None:
+        tp=max(0.05,min(1.0,float(trade_pct))); st["trade_pct"]=tp
+    if take_profit_pct is not None:
+        st["take_profit_pct"]=(max(0.005,min(1.0,float(take_profit_pct))) if float(take_profit_pct)>0 else None)
+    paper_state_path().write_text(json.dumps(st),encoding="utf-8")
+    return paper_summary()
 
 def paper_request(method,path,body=None):
     if not (MARKET_API_KEY and MARKET_API_SECRET): raise ValueError("Connect your free Alpaca keys first (same keys used for market data also work for the paper account).")
@@ -760,8 +774,9 @@ def paper_log(entry):
     TRADE_LOG.write_text(json.dumps(log[-500:]),encoding="utf-8")
 
 def paper_sync_to_verdict(v=None):
-    """Called automatically after each new daily close (only if the owner turned trading on). Moves the PAPER account to match the model's current call."""
-    if not paper_state().get("enabled"): return {"skipped":"paper trading is off"}
+    """Called automatically after each new daily close (only if the owner turned trading on). Moves the PAPER account to match the model's current call, using the owner's own chosen trade size."""
+    st=paper_state()
+    if not st.get("enabled"): return {"skipped":"paper trading is off"}
     v=v or final_verdict("tomorrow")
     if v.get("interim"): return {"skipped":"brain still training"}
     want_long = v["verdict"]=="BUY"
@@ -769,25 +784,43 @@ def paper_sync_to_verdict(v=None):
     if acct is None: return {"error":"could not read the paper account"}
     equity=float(acct.get("equity",0)); pos=paper_position()
     held_qty=float(pos.get("qty",0)) if pos else 0.0
+    trade_pct=st.get("trade_pct",PAPER_TARGET_PCT)
     order=None
     if want_long and held_qty<=0:
-        order=paper_request("POST","/v2/orders",{"symbol":PAPER_SYMBOL,"notional":round(equity*PAPER_TARGET_PCT,2),"side":"buy","type":"market","time_in_force":"day"})
+        order=paper_request("POST","/v2/orders",{"symbol":PAPER_SYMBOL,"notional":round(equity*trade_pct,2),"side":"buy","type":"market","time_in_force":"day"})
     elif not want_long and held_qty>0:
         order=paper_request("POST","/v2/orders",{"symbol":PAPER_SYMBOL,"qty":str(held_qty),"side":"sell","type":"market","time_in_force":"day"})
-    result={"as_of":v.get("as_of"),"verdict":v["verdict"],"confidence":v.get("confidence"),"equity_before":equity,"held_before":held_qty,"order":order}
+    result={"as_of":v.get("as_of"),"verdict":v["verdict"],"confidence":v.get("confidence"),"equity_before":equity,"held_before":held_qty,"trade_pct_used":trade_pct,"order":order}
     if order: paper_log(result)
     return result
 
+def paper_check_take_profit():
+    """Runs on its own, independent of the daily model call: if the owner set a take-profit %, sell the whole position the moment it's reached, to actually lock the profit in instead of waiting for the next model verdict."""
+    st=paper_state()
+    if not st.get("enabled"): return {"skipped":"paper trading is off"}
+    target=st.get("take_profit_pct")
+    if not target: return {"skipped":"no take-profit target set"}
+    try:
+        pos=paper_position()
+        if not pos or float(pos.get("qty",0))<=0: return {"skipped":"no open position"}
+        plpc=float(pos.get("unrealized_plpc",0) or 0)
+        if plpc<target: return {"skipped":"at %.2f%%, target is %.2f%%"%(plpc*100,target*100)}
+        order=paper_request("POST","/v2/orders",{"symbol":PAPER_SYMBOL,"qty":pos.get("qty"),"side":"sell","type":"market","time_in_force":"day"})
+        result={"as_of":datetime.now().isoformat(timespec="seconds"),"verdict":"TAKE_PROFIT_SELL","reason":"reached %.2f%% profit (target was %.2f%%) - sold to lock it in, independent of the model's own call"%(plpc*100,target*100),"order":order}
+        if order: paper_log(result)
+        return result
+    except ValueError as exc: return {"error":str(exc)}
+
 def paper_summary():
     st=paper_state()
-    out={"enabled":st.get("enabled",False),"symbol":PAPER_SYMBOL,"target_pct":PAPER_TARGET_PCT,"endpoint":"Alpaca PAPER (simulated money only)"}
+    out={"enabled":st.get("enabled",False),"symbol":PAPER_SYMBOL,"trade_pct":st.get("trade_pct",PAPER_TARGET_PCT),"take_profit_pct":st.get("take_profit_pct"),"endpoint":"Alpaca PAPER (simulated money only)"}
     if not (MARKET_API_KEY and MARKET_API_SECRET): out["error"]="Connect your free Alpaca keys first."; return out
     try:
         acct=paper_account()
         if acct is None: out["error"]="No paper account found for these keys."; return out
         pos=paper_position()
         out["account"]={"equity":float(acct.get("equity",0)),"cash":float(acct.get("cash",0)),"buying_power":float(acct.get("buying_power",0)),"start_equity":float(acct.get("last_equity",0))}
-        out["position"]={"qty":float(pos.get("qty",0)),"market_value":float(pos.get("market_value",0)),"unrealized_pl":float(pos.get("unrealized_pl",0))} if pos else None
+        out["position"]={"qty":float(pos.get("qty",0)),"market_value":float(pos.get("market_value",0)),"unrealized_pl":float(pos.get("unrealized_pl",0)),"unrealized_plpc":float(pos.get("unrealized_plpc",0) or 0)} if pos else None
         try: out["trades"]=json.loads(TRADE_LOG.read_text(encoding="utf-8"))[-25:]
         except (OSError,json.JSONDecodeError): out["trades"]=[]
     except ValueError as exc: out["error"]=str(exc)
@@ -874,6 +907,8 @@ def price_updater_loop():
     while True:
         try: refresh_prices(force=True); autopilot_once()
         except Exception as exc: AUTOPILOT["note"]="Autopilot error: "+str(exc)[:100]
+        try: paper_check_take_profit()   # checked every cycle, not just once a day, so a profit target is actually caught when it happens
+        except Exception: pass
         time.sleep(300 if market_session()=="regular session" else 1800)
 
 def trend_positions(closes,n,band):
@@ -1225,6 +1260,21 @@ def brain_status():
     b=brain_load()
     return {"trained":b is not None,"trained_through":(b or {}).get("trained_through"),"alarm_level":(b or {}).get("threshold"),"holdout":(b or {}).get("holdout"),"history":(b or {}).get("history",[])[-5:],"job":dict(BRAIN_JOB)}
 
+def monte_carlo_drop_risk(closes,horizon=None,drop=None,n_sims=3000,seed=12345):
+    """A pure-statistics estimate, with no learning and no neural network involved: draws real historical horizon-day windows at random, each with EQUAL probability of being picked, and reports the share where a drop of that size actually happened. This is 'historical bootstrap' simulation - a standard, honest statistical method, independent of anything the networks learned, used here as a second check on the same question."""
+    horizon=horizon or BRAIN_HORIZON; drop=drop or BRAIN_DROP
+    daily=[closes[i]/closes[i-1]-1 for i in range(1,len(closes))]
+    starts=list(range(0,len(daily)-horizon+1))
+    if len(starts)<100: return None
+    rnd=random.Random(seed); hits=0
+    for _ in range(n_sims):
+        s0=rnd.choice(starts); cum=1.0; worst=1.0
+        for r in daily[s0:s0+horizon]:
+            cum*=(1+r); worst=min(worst,cum)
+        if worst-1<=-drop: hits+=1
+    p=hits/n_sims; se=math.sqrt(p*(1-p)/n_sims)
+    return {"probability":p,"simulations":n_sims,"horizon_days":horizon,"drop_threshold":drop,"confidence_95_low":max(0.0,p-1.96*se),"confidence_95_high":min(1.0,p+1.96*se),"windows_available":len(starts),"method":"historical bootstrap: %d random real past %d-day windows, each drawn with equal probability (1/%d); no learning, no neural network involved"%(n_sims,horizon,len(starts))}
+
 def final_verdict(prompt=""):
     h,label,defaulted=parse_horizon(prompt)
     try: refresh_prices(False)
@@ -1236,7 +1286,7 @@ def final_verdict(prompt=""):
     pos=trend_positions(closes,n,band); trend_verdict="BUY" if pos[-1]==1 else "SELL"
     dist=closes[-1]/(sum(closes[-n:])/n)-1; d50=closes[-1]/(sum(closes[-50:])/50)-1
     start=eval_start(dates); everyday=horizon_stats(closes,[1.0]*len(closes),start,h,None)
-    out={"as_of":dates[-1],"data_note":price_data_note(),"hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,"horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,"trend_rule":{"average_days":n,"band_pct":band*100},"distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),"self_check":learn_note,"brain":None}
+    out={"as_of":dates[-1],"data_note":price_data_note(),"hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,"horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,"trend_rule":{"average_days":n,"band_pct":band*100},"distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),"self_check":learn_note,"brain":None,"monte_carlo":monte_carlo_drop_risk(closes,h if h>=5 else BRAIN_HORIZON,BRAIN_DROP)}
     if brain is None:
         started=start_brain_job(False)
         out.update({"verdict":trend_verdict,"confidence":"Low","interim":True,"brain_job":started["message"]}); return out
@@ -1265,6 +1315,8 @@ def build_final_answer(v):
     state="above" if v["risk_score"]>=v["alarm_level"] else "below"
     parts.append("Why: my neural networks put the chance of a drop of 8%% or more within about a month at %s. My alarm level is %s, and the score is %s it, so the networks say %s."%(p0(v["risk_score"]),p0(v["alarm_level"]),state,v["brain_verdict"]))
     parts.append("Second opinion: the simple trend rule says %s (the index is %.1f%% %s its %d-day average and %.1f%% %s its 50-day average), so the two %s."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n,abs(v["distance_from_50day_pct"]),"above" if v["distance_from_50day_pct"]>=0 else "below","agree" if v["agree"] else "disagree, so I lowered my confidence"))
+    mc=v.get("monte_carlo")
+    if mc: parts.append("Third check, pure statistics: resampling %d real historical %d-day stretches at random (no learning involved), a drop like this happened %s of the time (95%% confidence range %s to %s)."%(mc["simulations"],mc["horizon_days"],p0(mc["probability"]),p0(mc["confidence_95_low"]),p0(mc["confidence_95_high"])))
     b=v["brain"]; ho=b["holdout"]; s=ho["strategy"]; bh=ho["buy_and_hold"]
     if ho.get("auc") is not None:
         txt="How good the brain is: on days it never saw during training (%s to %s), its risk score separated stormy from calm periods with a score of %.2f (0.50 would be a coin flip)."%(b["holdout_start"],b["holdout_end"],ho["auc"])
@@ -1357,6 +1409,13 @@ def general_answer(prompt):
     elif has("hour","intraday","alpaca"):
         tools.append("intraday")
         parts.append((intraday_note(21) or "The hourly collector has not produced results yet.")+" Hourly price changes are saved and tested against the daily-only brain; they are used for predictions only if they improve the unseen-data score by a clear margin.")
+    elif has("monte carlo","simulation","simulate","statistic","random sampl","bootstrap","equal probab"):
+        tools.append("monte_carlo"); dates,closes=load_price_series(); mc=monte_carlo_drop_risk(closes)
+        if mc:
+            drop_pct="%.0f"%(100*mc["drop_threshold"])
+            parts.append("A pure statistics check, with no neural network involved: I took %d random real stretches of the market's history, each %d trading days long and each picked with equal probability (1 in %d), and counted how often a drop of %s%% or more happened inside one. Answer: %.1f%% of the time, with a 95%% confidence range of %.1f%% to %.1f%%."%(mc["simulations"],mc["horizon_days"],mc["windows_available"],drop_pct,100*mc["probability"],100*mc["confidence_95_low"],100*mc["confidence_95_high"]))
+            parts.append("Compare this to the networks' own estimate by asking for a buy/sell call - if the two disagree by a lot, that's worth noticing.")
+        else: parts.append("Not enough price history yet to run the simulation reliably.")
     elif has("mistake","wrong","learn from","got it wrong","missed","fail"):
         tools.append("recent_mistakes"); miss=recent_mistakes(3)
         if miss: parts.append("Recent wrong calls, with the actual numbers: "+" | ".join(m["explanation"] for m in miss))
@@ -1402,6 +1461,10 @@ def mira_facts():
     try:
         v=final_verdict("next month")
         if not v.get("interim"): lines.append("Current call (next month): %s, confidence %s, drop risk %.1f%% vs alarm %.1f%%, trend rule %s, data as of %s."%(v["verdict"],v["confidence"],100*v["risk_score"],100*v["alarm_level"],v["trend_verdict"],v["as_of"]))
+    except Exception: pass
+    try:
+        mc=(v or {}).get("monte_carlo")
+        if mc: lines.append("Pure-statistics check (no learning, historical bootstrap of %d real %d-day windows): a drop like this happened %.1f%% of the time (95%% range %.1f%%-%.1f%%)."%(mc["simulations"],mc["horizon_days"],100*mc["probability"],100*mc["confidence_95_low"],100*mc["confidence_95_high"]))
     except Exception: pass
     try: lines.append(price_data_note())
     except Exception: pass
@@ -1558,7 +1621,7 @@ def chart_payload(days=180):
         else: data["replay"]=[]; data["scoreboard"]={"available":False}
         try:
             v=final_verdict("next month")
-            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","agree","brain_job","as_of")}
+            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","agree","brain_job","as_of","monte_carlo")}
         except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
         CHART_CACHE.update({"at":now,"days":days,"data":data})
     out=dict(CHART_CACHE["data"])
@@ -1685,6 +1748,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=="/api/nasdaq": result=forecast_nasdaq(payload)
             elif path=="/api/brain": result=start_brain_job(force=bool(payload.get("force",True)))
             elif path=="/api/paper-trade/toggle": paper_set_enabled(bool(payload.get("enabled"))); result=paper_summary()
+            elif path=="/api/paper-trade/config": result=paper_set_config(payload.get("trade_pct"),payload.get("take_profit_pct"))
             elif path=="/api/target": result=target_set(payload.get("pct"),payload.get("by_date",""),payload.get("note",""))
             elif path=="/api/paper-trade/sync": result=paper_sync_to_verdict()
             else: self.send_error(404); return

@@ -15,8 +15,9 @@
 <div class="stat" style="margin-top:10px"><small>Monte Carlo check (pure statistics, no network)</small><b id="mcLine">Loading…</b></div>
 </section>
 <section class="panel" id="paperTrade"><div class="head"><h2>Paper trading (simulated money) · QQQ</h2><span class="pill" id="paperStatus">OFF</span></div>
-<p class="soft">When on, after each new day\'s close the model moves this Alpaca PAPER account to match its own call: BUY = invest 90% of paper equity in QQQ, SELL = go flat. No real money is ever involved; this only runs on your own computer, never from the public page.</p>
+<p class="soft">When on, after each new day\'s close the model moves this Alpaca PAPER account to match its own call: BUY = invest your chosen % of paper equity in QQQ, SELL = go flat. A take-profit %, if set, sells automatically the moment it\'s reached, checked every few minutes, independent of the model\'s call. No real money is ever involved; this only runs on your own computer, never from the public page.</p>
 <div class="lineStats"><div class="stat"><small>Paper equity</small><b id="paperEquity">—</b></div><div class="stat"><small>Since start</small><b id="paperPL">—</b></div><div class="stat"><small>Position</small><b id="paperPos">—</b></div><div class="stat"><small>Unrealized P/L</small><b id="paperUPL">—</b></div></div>
+<div class="formrow" style="margin-top:10px"><label>Trade size · % of paper equity<input id="paperTradePct" type="number" min="5" max="100" step="1" value="90" style="width:70px"></label><label>Take-profit % (optional, auto-sells)<input id="paperTakeProfit" type="number" min="0" max="100" step="0.5" placeholder="e.g. 5" style="width:90px"></label><button id="paperSaveConfig" class="secondary" type="button">Save size / target</button></div>
 <div class="formrow" style="margin-top:10px"><button id="paperToggle" class="secondary">Turn paper trading on</button><button id="paperSyncNow" class="secondary">Sync now</button><span class="soft" id="paperMsg"></span></div>
 <details style="margin-top:8px"><summary>Trade log</summary><table class="table" id="paperLogTable"><thead><tr><th>Date</th><th>Call</th><th>Order</th></tr></thead><tbody id="paperLog"></tbody></table></details>
 </section>
@@ -172,16 +173,23 @@ async function refreshMistakes(){try{let r=await fetch("/api/mistakes?t="+Date.n
  }else{$("targetPill").textContent="NOT SET";$("targetPill").style.color="var(--muted)";$("targetView").textContent="No target set."}
 }catch(e){}}
 $("targetSet").onclick=async()=>{let b=$("targetSet");b.disabled=true;try{let pct=parseFloat($("targetPct").value);if(!Number.isFinite(pct))throw Error("Enter a target percent.");await post("/api/target",{pct:pct,by_date:$("targetDate").value,note:""});$("targetMsg").textContent="Saved.";await refreshMistakes()}catch(e){$("targetMsg").textContent=e.message}finally{b.disabled=false}}
+let paperConfigLoaded=false;
 async function refreshPaper(){try{let r=await fetch("/api/paper-trade?t="+Date.now(),{cache:"no-store"}),d=await r.json();
  $("paperStatus").textContent=d.enabled?"ON":"OFF";$("paperStatus").style.color=d.enabled?"var(--green)":"var(--muted)";
  $("paperToggle").textContent=d.enabled?"Turn paper trading off":"Turn paper trading on";
+ if(!paperConfigLoaded&&document.activeElement!==$("paperTradePct")&&document.activeElement!==$("paperTakeProfit")){
+  if(d.trade_pct!=null)$("paperTradePct").value=Math.round(d.trade_pct*100);
+  $("paperTakeProfit").value=d.take_profit_pct!=null?(d.take_profit_pct*100):"";
+  paperConfigLoaded=true;
+ }
  if(d.error){$("paperMsg").textContent=d.error;$("paperEquity").textContent="—";$("paperPos").textContent="—";$("paperPL").textContent="—";$("paperUPL").textContent="—";return}
  $("paperMsg").textContent="";let a=d.account||{};$("paperEquity").textContent=a.equity!=null?"$"+a.equity.toFixed(2):"—";
  let pl=a.equity!=null&&a.start_equity?a.equity-a.start_equity:null;$("paperPL").textContent=pl==null?"—":(pl>=0?"+$":"-$")+Math.abs(pl).toFixed(2);$("paperPL").style.color=pl>0?"var(--green)":pl<0?"var(--red)":"var(--txt)";
  $("paperPos").textContent=d.position?d.position.qty.toFixed(3)+" sh":"Flat (0)";
  $("paperUPL").textContent=d.position?((d.position.unrealized_pl>=0?"+$":"-$")+Math.abs(d.position.unrealized_pl).toFixed(2)):"—";
- $("paperLog").replaceChildren();(d.trades||[]).slice().reverse().forEach(tr=>{let row=document.createElement("tr"),ord=tr.order?(tr.order.side+" "+(tr.order.notional?"$"+tr.order.notional:tr.order.qty+" sh")):"no change";row.innerHTML="<td>"+tr.as_of+"</td><td>"+tr.verdict+"</td><td>"+ord+"</td>";$("paperLog").append(row)})
+ $("paperLog").replaceChildren();(d.trades||[]).slice().reverse().forEach(tr=>{let row=document.createElement("tr"),ord=tr.order?(tr.order.side+" "+(tr.order.notional?"$"+tr.order.notional:tr.order.qty+" sh")):"no change",tag=tr.verdict==="TAKE_PROFIT_SELL"?" (take-profit)":"";row.innerHTML="<td>"+tr.as_of.slice(0,19).replace("T"," ")+"</td><td>"+tr.verdict+tag+"</td><td>"+ord+"</td>";$("paperLog").append(row)})
 }catch(e){$("paperMsg").textContent="Could not reach the local server."}}
+$("paperSaveConfig").onclick=async()=>{let b=$("paperSaveConfig");b.disabled=true;try{let tp=parseFloat($("paperTradePct").value)/100,tpf=$("paperTakeProfit").value===""?0:parseFloat($("paperTakeProfit").value)/100;if(!Number.isFinite(tp)||tp<=0)throw Error("Enter a trade size % first.");await post("/api/paper-trade/config",{trade_pct:tp,take_profit_pct:tpf});$("paperMsg").textContent="Saved: "+Math.round(tp*100)+"% per trade"+(tpf>0?", take-profit at "+(tpf*100).toFixed(1)+"%":", no take-profit")+".";await refreshPaper()}catch(e){$("paperMsg").textContent=e.message}finally{b.disabled=false}}
 $("paperToggle").onclick=async()=>{$("paperToggle").disabled=true;try{let on=$("paperToggle").textContent.includes("on");await post("/api/paper-trade/toggle",{enabled:on});await refreshPaper()}catch(e){$("paperMsg").textContent=e.message}finally{$("paperToggle").disabled=false}}
 $("paperSyncNow").onclick=async()=>{$("paperSyncNow").disabled=true;try{let d=await post("/api/paper-trade/sync",{});$("paperMsg").textContent=d.skipped?("Not synced: "+d.skipped):(d.order?"Order placed.":"Already matches the model's call.");await refreshPaper()}catch(e){$("paperMsg").textContent=e.message}finally{$("paperSyncNow").disabled=false}}
 
