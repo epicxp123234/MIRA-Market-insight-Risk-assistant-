@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MIRA Live Market View</title>
+<style>
+:root{--bg:#0a1019;--panel:#111a2a;--line:#1f2d44;--text:#e6edf6;--muted:#8da2bb;--up:#2dd4bf;--down:#f87171;--warn:#fbbf24;--grey:#475569}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:15px;letter-spacing:.14em;text-transform:uppercase}
+h1 span{color:var(--muted);font-weight:400}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.chip.ok{color:var(--up);border-color:#1d5b55}.chip.bad{color:var(--down);border-color:#6b2b2b}
+main{max-width:1180px;margin:0 auto;padding:16px 20px 40px}
+.top{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:14px}
+@media(max-width:820px){.top{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.card h2{margin:0 0 10px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.verdict{display:flex;align-items:center;gap:16px}
+.arrow{font-size:54px;line-height:1}
+.big{font-size:34px;font-weight:700;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:13px}
+.buy{color:var(--up)}.sell{color:var(--down)}
+.gauge{margin-top:14px}
+.bar{position:relative;height:10px;border-radius:6px;background:#0c1422;border:1px solid var(--line);overflow:visible}
+.fill{height:100%;border-radius:6px}
+.tick{position:absolute;top:-5px;width:2px;height:20px;background:var(--warn)}
+.glabel{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px}
+.stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted)}
+.stat.warn b{color:var(--warn)}
+.chartcard{margin-top:14px;padding:14px 14px 10px}
+.ctrl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+select{background:#0c1422;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:4px 8px}
+.wrap{position:relative}
+canvas{display:block;width:100%}
+#chart{height:430px}
+#tick{height:90px;margin-top:8px}
+#tip{position:absolute;pointer-events:none;background:#0c1422ee;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:none;min-width:170px;z-index:3}
+.note{color:var(--muted);font-size:12.5px;margin:14px 2px 0}
+.note b{color:var(--text)}
+.msg{color:var(--warn);font-size:13px;margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>MIRA <span>/ Live market view</span></h1>
+  <div class="chips">
+    <span class="chip" id="chipServer">Connecting…</span>
+    <span class="chip" id="chipData">Data —</span>
+    <span class="chip" id="chipLive">Live price —</span>
+  </div>
+</header>
+<main>
+  <section class="top">
+    <div class="card" id="verdictCard"><h2>Model's view right now</h2><div class="sub">Loading…</div></div>
+    <div class="card" id="scoreCard"><h2>How often is it right? (days it never saw)</h2><div class="sub">Loading…</div></div>
+  </section>
+
+  <section class="card chartcard">
+    <div class="ctrl">
+      <div class="legend" id="legend"></div>
+      <label class="sub">Range
+        <select id="range"><option value="90">3 months</option><option value="180" selected>6 months</option><option value="365">1 year</option></select>
+      </label>
+    </div>
+    <div class="wrap">
+      <canvas id="chart"></canvas>
+      <div id="tip"></div>
+    </div>
+    <canvas id="tick"></canvas>
+    <div class="msg" id="chartMsg"></div>
+  </section>
+
+  <p class="note"><b>How to read this.</b> Under the price, the top strip is the model's call each day (teal = BUY, red = SELL). The strip below it shows whether that call turned out right a month later: <b>green = right, red = wrong, grey = too recent to tell</b>. Every call to the left of today was made by a network trained <b>before</b> those days, so you are seeing real out-of-sample results, not a replay of what it had already learned. "Right" means: SELL before a drop of 8% or more within about a month, or BUY when no such drop followed. This is research output, not financial advice.</p>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const STATIC=!!window.MIRA_STATIC;
+const UP=getComputedStyle(document.documentElement).getPropertyValue('--up').trim()||'#2dd4bf';
+const DOWN='#f87171',GREY='#475569',WARN='#fbbf24',MUTED='#8da2bb',LINE='#1f2d44';
+let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1;
+const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
+const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+
+async function load(){
+  try{
+    const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):('/api/chart?days='+$('range').value),{cache:'no-store'});
+    const j=await r.json();
+    if(j.error){throw new Error(j.error)}
+    if(STATIC){const n=+$('range').value,k=Math.max(0,j.dates.length-n),first=j.dates[k];j.dates=j.dates.slice(k);j.closes=j.closes.slice(k);j.candles=(j.candles||[]).filter(c=>c.d>=first);j.replay=(j.replay||[]).filter(m=>m.d>=first)}
+    data=j; $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok';
+    absorbLive(); renderCards(); draw(); drawTick();
+  }catch(e){
+    $('chipServer').textContent='Server not reachable'; $('chipServer').className='chip bad';
+  }
+}
+
+function absorbLive(){
+  const L=data.live||{};
+  if(L.connected&&L.last!=null){
+    const t=Date.now(); const last=liveBuf[liveBuf.length-1];
+    if(!last||last.p!==Number(L.last)||t-last.t>20000) liveBuf.push({t,p:Number(L.last)});
+    if(liveBuf.length>240) liveBuf.shift();
+    $('chipLive').textContent='QQQ '+fmt(L.last)+(L.day_change_pct!=null?'  '+(L.day_change_pct>=0?'+':'')+(L.day_change_pct*100).toFixed(2)+'%':'')+' · '+(L.session||'');
+    $('chipLive').className='chip ok';
+  }else{
+    $('chipLive').textContent='Live price off · connect Alpaca keys'; $('chipLive').className='chip';
+  }
+  $('chipData').textContent='Data through '+data.as_of;
+}
+
+function renderCards(){
+  const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{};
+  let h='<h2>Model\'s view right now</h2>';
+  if(v.error){h+='<div class="sub">'+v.error+'</div>'}
+  else if(v.interim){h+='<div class="sub">The neural networks are still training for the first time ('+(v.brain_job||'')+'). The trend rule says <b>'+v.trend_verdict+'</b> in the meantime. Reload in a few minutes.</div>'}
+  else{
+    const buy=v.verdict==='BUY', c=buy?'buy':'sell';
+    const risk=v.risk_score, alarm=v.alarm_level, max=Math.max(.4,alarm*1.6,risk*1.2);
+    h+='<div class="verdict"><div class="arrow '+c+'">'+(buy?'▲':'▼')+'</div><div><div class="big '+c+'">'+(buy?'BUY':'SELL')+'</div><div class="sub">Confidence: <b>'+v.confidence+'</b> · next month · data to '+v.as_of+'</div></div></div>';
+    h+='<div class="gauge"><div class="bar"><div class="fill" style="width:'+Math.min(100,risk/max*100)+'%;background:'+(risk>=alarm?DOWN:UP)+'"></div><div class="tick" style="left:'+Math.min(100,alarm/max*100)+'%"></div></div>'
+      +'<div class="glabel"><span>Chance of a drop of 8%+ in about a month: <b style="color:var(--text)">'+pct(risk,0)+'</b></span><span>Alarm level '+pct(alarm,0)+'</span></div></div>'
+      +'<div class="sub" style="margin-top:10px">Second opinion (trend rule): <b>'+v.trend_verdict+'</b> — '+(v.agree?'agrees with the networks.':'<span style="color:var(--warn)">disagrees with the networks.</span>')+'</div>';
+  }
+  $('verdictCard').innerHTML=h;
+
+  let s='<h2>How often is it right? (days it never saw)</h2>';
+  if(sb.available){
+    const worse=sb.call_accuracy<sb.always_buy_accuracy;
+    s+='<div class="stats">'
+     +'<div class="stat '+(worse?'warn':'')+'"><b>'+pct(sb.call_accuracy)+'</b><span>Calls right (BUY/SELL). Always saying BUY: '+pct(sb.always_buy_accuracy)+'</span></div>'
+     +'<div class="stat"><b>'+(sb.auc!=null?sb.auc.toFixed(2):'—')+'</b><span>Risk-ranking score (0.50 = coin flip)</span></div>'
+     +'<div class="stat"><b>'+pct(sb.drops_caught,0)+'</b><span>Of real 8%+ drops, how many it warned about</span></div>'
+     +'<div class="stat"><b>'+pct(sb.alarm_precision,0)+'</b><span>Alarms that were followed by a drop (drops happen '+pct(sb.drop_base_rate,0)+' of the time anyway)</span></div>'
+     +'</div>';
+    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Following its calls: <b>'+pct(sb.strategy.cagr)+'</b>/yr, worst drop '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold: <b>'+pct(sb.buy_and_hold.cagr)+'</b>/yr, worst drop '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' unseen days).</div>';
+  }else s+='<div class="sub">The test results appear once the networks have trained.</div>';
+  const lm=lr.month_graded? lr.month_right+' of '+lr.month_graded+' right (always-BUY: '+lr.month_always_buy_right+')':'none graded yet';
+  s+='<div class="sub" style="margin-top:8px">Live record since this server started logging: '+(lr.calls||0)+' calls · month-ahead: '+lm+'.</div>';
+  $('scoreCard').innerHTML=s;
+
+  const hasC=data.candles&&data.candles.length>0;
+  $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>Up candle</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>Nasdaq-100 close</span>')
+   +'<span><i style="background:'+UP+'"></i>Call: BUY</span><span><i style="background:'+DOWN+'"></i>Call: SELL</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
+  $('chartMsg').textContent=hasC?'':'Candlesticks need hourly QQQ data: connect your Alpaca keys and let the hourly collector run. Showing the Nasdaq-100 daily close until then.';
+}
+
+function setup(cv){const r=cv.getBoundingClientRect();cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return {x,w:r.width,h:r.height}}
+
+function series(){
+  const d=data, dates=d.dates.slice(); const hasC=d.candles&&d.candles.length>0;
+  const cmap={}; (d.candles||[]).forEach(c=>cmap[c.d]=Object.assign({},c));
+  const L=d.live||{};
+  const lastC=(d.candles||[]).slice(-1)[0];
+  if(hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<0.25){
+    const md=(L.market_time||'').slice(0,10), p=Number(L.last);
+    if(md){ if(!dates.includes(md)&&md>dates[dates.length-1]) dates.push(md);
+      const c=cmap[md]; if(c){c.c=p;c.h=Math.max(c.h,p);c.l=Math.min(c.l,p);c.live=true}
+      else{const prev=[...dates].reverse().map(x=>cmap[x]).find(Boolean); const o=prev?prev.c:p; cmap[md]={d:md,o:o,h:Math.max(o,p),l:Math.min(o,p),c:p,live:true}} }
+  }
+  const idx={}; dates.forEach((x,i)=>idx[x]=i);
+  const calls={}; (d.replay||[]).forEach(m=>calls[m.d]=m);
+  return {dates,cmap,idx,calls,hasC};
+}
+
+function draw(){
+  if(!data) return;
+  const cv=$('chart'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
+  const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=26, gap=10;
+  const plotW=w-padL-padR-fz, plotH=h-top-axisH-stripH-gap, step=plotW/N;
+  const X=i=>padL+(i+.5)*step;
+  let lo=Infinity,hi=-Infinity;
+  if(S.hasC){S.dates.forEach(dd=>{const c=S.cmap[dd];if(c){lo=Math.min(lo,c.l);hi=Math.max(hi,c.h)}})}
+  else{data.closes.forEach(v=>{lo=Math.min(lo,v);hi=Math.max(hi,v)})}
+  const pad=(hi-lo)*.08||1; lo-=pad; hi+=pad*1.6;
+  const Y=v=>top+(hi-v)/(hi-lo)*plotH;
+  geo={S,N,X,Y,step,padL,plotW,top,plotH,stripY:top+plotH+gap,stripH,w,h};
+  x.font='11px system-ui';x.textBaseline='middle';
+  for(let k=0;k<=4;k++){const v=lo+(hi-lo)*k/4,yy=Y(v);x.strokeStyle=LINE;x.lineWidth=1;x.beginPath();x.moveTo(padL,yy);x.lineTo(padL+plotW,yy);x.stroke();x.fillStyle=MUTED;x.textAlign='left';x.fillText(fmt(v,0),padL+4,yy-7)}
+  // price
+  if(S.hasC){
+    S.dates.forEach((dd,i)=>{const c=S.cmap[dd];if(!c)return;const up=c.c>=c.o,col=up?UP:DOWN,xx=X(i);
+      x.strokeStyle=col;x.lineWidth=1;x.beginPath();x.moveTo(xx,Y(c.h));x.lineTo(xx,Y(c.l));x.stroke();
+      const bw=Math.max(1.5,step*.62),y1=Y(Math.max(c.o,c.c)),y2=Y(Math.min(c.o,c.c));
+      if(c.live){x.strokeStyle=col;x.strokeRect(xx-bw/2,y1,bw,Math.max(1.5,y2-y1))}else{x.fillStyle=col;x.fillRect(xx-bw/2,y1,bw,Math.max(1.5,y2-y1))}});
+  }else{
+    x.beginPath();data.closes.forEach((v,i)=>{const xx=X(i),yy=Y(v);i?x.lineTo(xx,yy):x.moveTo(xx,yy)});
+    x.strokeStyle='#9fb3c8';x.lineWidth=1.6;x.stroke();
+    x.lineTo(X(N-1),top+plotH);x.lineTo(X(0),top+plotH);x.closePath();const g=x.createLinearGradient(0,top,0,top+plotH);g.addColorStop(0,'#9fb3c833');g.addColorStop(1,'#9fb3c800');x.fillStyle=g;x.fill();
+  }
+  // call strips + markers
+  const priceAt=(dd,k)=>{const c=S.cmap[dd];if(c)return k==='h'?c.h:c.l;const i=data.dates.indexOf(dd);return i<0?null:data.closes[i]};
+  let prev=null;
+  S.dates.forEach((dd,i)=>{const m=S.calls[dd];if(!m)return;
+    x.fillStyle=m.v==='BUY'?UP+'99':DOWN;x.fillRect(X(i)-step/2+.3,geo.stripY,Math.max(1,step-.6),stripH/2-2);
+    x.fillStyle=m.o==null?GREY:(m.o?'#22c55e':'#ef4444');x.fillRect(X(i)-step/2+.3,geo.stripY+stripH/2,Math.max(1,step-.6),stripH/2-2);
+    if(prev!==m.v){const py=m.v==='SELL'?Y(priceAt(dd,'h')??lo)-10:Y(priceAt(dd,'l')??hi)+10;
+      x.fillStyle=m.v==='SELL'?DOWN:UP;x.font='12px system-ui';x.textAlign='center';x.fillText(m.v==='SELL'?'▼':'▲',X(i),py)}
+    prev=m.v});
+  // date axis
+  x.fillStyle=MUTED;x.font='11px system-ui';x.textAlign='center';x.textBaseline='top';
+  const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));x.fillText(S.dates[i].slice(5),X(i),h-axisH+6)}
+  // forecast zone
+  const fx=padL+plotW+ (fz>0?6:0), v=data.verdict||{};
+  x.textBaseline='middle';
+  if(!v.error&&!v.interim&&v.verdict){const buy=v.verdict==='BUY',col=buy?UP:DOWN,cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
+    x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
+    x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(buy?'▲':'▼',cx,cy);
+    x.font='600 13px system-ui';x.fillText(v.verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('alarm '+pct(v.alarm_level,0),cx,cy+66)}
+  else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('Model view',padL+plotW+fz/2-10,top+plotH*.4)}
+  // hover line
+  if(hover>=0&&hover<N){x.strokeStyle='#8da2bb66';x.lineWidth=1;x.setLineDash([3,3]);x.beginPath();x.moveTo(X(hover),top);x.lineTo(X(hover),top+plotH+gap+stripH);x.stroke();x.setLineDash([])}
+}
+
+function drawTick(){
+  const cv=$('tick'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
+  x.fillStyle=MUTED;x.font='11px system-ui';x.textBaseline='top';x.textAlign='left';x.fillText(STATIC?'LIVE PRICE (QQQ) · static page: refreshed by GitHub about every 30 minutes':'LIVE PRICE (QQQ) · updates every 10 seconds',8,4);
+  if(liveBuf.length<2){x.fillStyle=MUTED;x.textBaseline='middle';x.textAlign='center';x.fillText(liveBuf.length?'Waiting for the next price…':'Connect your Alpaca keys to see the live price move here.',w/2,h/2+8);return}
+  const ps=liveBuf.map(b=>b.p),lo=Math.min(...ps),hi=Math.max(...ps),pad=(hi-lo)*.2||.05,t0=liveBuf[0].t,t1=liveBuf[liveBuf.length-1].t||1;
+  const X=t=>12+(t-t0)/Math.max(1,t1-t0)*(w-110),Y=p=>22+(hi+pad-p)/(hi-lo+2*pad)*(h-34);
+  const up=ps[ps.length-1]>=ps[0],col=up?UP:DOWN;
+  x.beginPath();liveBuf.forEach((b,i)=>i?x.lineTo(X(b.t),Y(b.p)):x.moveTo(X(b.t),Y(b.p)));x.strokeStyle=col;x.lineWidth=2;x.stroke();
+  const lx=X(t1),ly=Y(ps[ps.length-1]),pulse=(Math.sin(Date.now()/350)+1)/2;
+  x.beginPath();x.arc(lx,ly,4+pulse*4,0,7);x.fillStyle=col+'33';x.fill();x.beginPath();x.arc(lx,ly,3.5,0,7);x.fillStyle=col;x.fill();
+  x.fillStyle='#e6edf6';x.font='600 14px system-ui';x.textAlign='left';x.textBaseline='middle';x.fillText(fmt(ps[ps.length-1]),w-92,ly);
+}
+
+$('chart').addEventListener('mousemove',e=>{
+  if(!geo||!data)return;const r=$('chart').getBoundingClientRect(),mx=e.clientX-r.left,i=Math.round((mx-geo.padL)/geo.step-.5);
+  if(i<0||i>=geo.N){hover=-1;$('tip').style.display='none';draw();return}
+  hover=i;const dd=geo.S.dates[i],c=geo.S.cmap[dd],m=geo.S.calls[dd],close=(c&&c.c)??data.closes[data.dates.indexOf(dd)];
+  let t='<b>'+dd+'</b><br>'+(c?'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c):'Close '+fmt(close));
+  if(m)t+='<br><span style="color:'+(m.v==='BUY'?UP:DOWN)+'"><b>Model: '+m.v+'</b></span> · drop risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Call was right</span>':'<span style="color:#ef4444">Call was wrong</span>'));
+  const tip=$('tip');tip.innerHTML=t;tip.style.display='block';const tx=Math.min(mx+14,r.width-190);tip.style.left=tx+'px';tip.style.top='10px';draw()});
+$('chart').addEventListener('mouseleave',()=>{hover=-1;$('tip').style.display='none';draw()});
+$('range').addEventListener('change',load);
+window.addEventListener('resize',()=>{draw();drawTick()});
+setInterval(load,STATIC?120000:10000);setInterval(()=>{if(data)drawTick()},400);
+load();
+</script>
+</body>
+</html>
