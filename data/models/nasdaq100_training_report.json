@@ -1,81 +1,81 @@
 {
   "model_name": "MIRA \u2014 Market Insight & Risk Assistant",
   "instrument": "Nasdaq-100 research series",
-  "data_as_of": "2026-10-27",
-  "trained_on": "2026-10-28",
+  "data_as_of": "2026-10-29",
+  "trained_on": "2026-11-01",
   "signal": "HOLD / NO EDGE DETECTED",
-  "next_session_up_probability": 0.54521,
-  "next20_session_10pct_drawdown_risk": 0.05714,
-  "next20_session_high_volatility_probability": 0.09706,
+  "next_session_up_probability": 0.54523,
+  "next20_session_10pct_drawdown_risk": 0.05206,
+  "next20_session_high_volatility_probability": 0.09044,
   "direction": {
     "holdout_accuracy": 0.5585365853658537,
     "majority_baseline_accuracy": 0.5604878048780488,
-    "balanced_accuracy": 0.4986186898031295,
-    "precision": 0.5598039215686275,
-    "recall": 0.9939077458659704,
-    "false_positive_rate": 0.9966703662597114,
-    "false_negative_rate": 0.006092254134029591,
+    "balanced_accuracy": 0.49897802364455307,
+    "precision": 0.5599803343166175,
+    "recall": 0.9912967798085291,
+    "false_positive_rate": 0.9933407325194229,
+    "false_negative_rate": 0.008703220191470844,
     "confusion": {
-      "true_positive": 1142,
-      "false_positive": 898,
-      "true_negative": 3,
-      "false_negative": 7
+      "true_positive": 1139,
+      "false_positive": 895,
+      "true_negative": 6,
+      "false_negative": 10
     }
   },
   "stress": {
-    "holdout_accuracy": 0.22195121951219512,
+    "holdout_accuracy": 0.31853658536585366,
     "majority_baseline_accuracy": 0.9180487804878049,
-    "balanced_accuracy": 0.5599855776529529,
-    "precision": 0.09251856082238721,
-    "recall": 0.9642857142857143,
-    "false_positive_rate": 0.8443145589798087,
-    "false_negative_rate": 0.03571428571428571,
+    "balanced_accuracy": 0.5909050655331207,
+    "precision": 0.10019518542615485,
+    "recall": 0.9166666666666666,
+    "false_positive_rate": 0.7348565356004251,
+    "false_negative_rate": 0.08333333333333333,
     "confusion": {
-      "true_positive": 162,
-      "false_positive": 1589,
-      "true_negative": 293,
-      "false_negative": 6
+      "true_positive": 154,
+      "false_positive": 1383,
+      "true_negative": 499,
+      "false_negative": 14
     },
     "decision_threshold": 0.025,
     "threshold_selection": "F2 on separate chronological validation block",
-    "validation_precision": 0.02164111812443643,
-    "validation_recall": 0.8571428571428571
+    "validation_precision": 0.023668639053254437,
+    "validation_recall": 0.7142857142857143
   },
   "volatility_regime": {
-    "holdout_accuracy": 0.8004878048780488,
+    "holdout_accuracy": 0.7995121951219513,
     "majority_baseline_accuracy": 0.7936585365853659,
-    "balanced_accuracy": 0.527045091620279,
-    "precision": 0.6842105263157895,
-    "recall": 0.061465721040189124,
-    "false_positive_rate": 0.007375537799631223,
-    "false_negative_rate": 0.9385342789598109,
+    "balanced_accuracy": 0.5238063064044834,
+    "precision": 0.6764705882352942,
+    "recall": 0.054373522458628844,
+    "false_positive_rate": 0.006760909649661954,
+    "false_negative_rate": 0.9456264775413712,
     "confusion": {
-      "true_positive": 26,
-      "false_positive": 12,
-      "true_negative": 1615,
-      "false_negative": 397
+      "true_positive": 23,
+      "false_positive": 11,
+      "true_negative": 1616,
+      "false_negative": 400
     },
     "target": "next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"
   },
-  "train_rows": 6536,
+  "train_rows": 6538,
   "validation_rows": 1620,
   "holdout_rows": 2050,
   "purged_boundary_rows": 20,
   "validation_best_epochs": {
     "direction": [
-      2,
-      1,
-      2
-    ],
-    "stress": [
       5,
       1,
-      7
+      1
+    ],
+    "stress": [
+      13,
+      4,
+      5
     ],
     "volatility_regime": [
-      13,
-      17,
-      11
+      20,
+      10,
+      10
     ]
   },
   "ensemble_members_per_task": 3,
