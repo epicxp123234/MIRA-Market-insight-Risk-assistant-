@@ -1,4 +1,12 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import socket, sys
+
+class QuietServer(ThreadingHTTPServer):
+    """Same as ThreadingHTTPServer, except it doesn't print a scary traceback when a browser tab just cancels a poll mid-response (normal when a page refreshes or a newer request replaces an older one) - a real error still prints normally."""
+    def handle_error(self,request,client_address):
+        exc=sys.exc_info()[1]
+        if isinstance(exc,(ConnectionAbortedError,ConnectionResetError,BrokenPipeError,socket.timeout)): return
+        super().handle_error(request,client_address)
 from pathlib import Path
 import json, math, random, csv, io, time, os, sqlite3, ctypes
 from contextlib import closing
@@ -1621,11 +1629,17 @@ def chart_live_record():
     m=[e for e in led if "dropped_8pct_21d" in e]; d=[e for e in led if "next_day_up" in e]
     return {"calls":len(led),"month_graded":len(m),"month_right":sum(int((e["verdict"]=="SELL")==e["dropped_8pct_21d"]) for e in m),"month_always_buy_right":sum(int(not e["dropped_8pct_21d"]) for e in m),"day_graded":len(d),"day_right":sum(int((e["verdict"]=="BUY")==e["next_day_up"]) for e in d),"day_always_buy_right":sum(int(e["next_day_up"]) for e in d)}
 
+def refresh_prices_background():
+    """Same job as refresh_prices(), but for callers that must respond fast (a live page waiting on this request) and can't afford to block on a slow/unreachable FRED server (up to ~75s of retries). Kicks the real refresh off on its own thread if one isn't already running, and returns immediately either way - the page just shows whatever data is already on disk from the last successful refresh, instead of hanging."""
+    if PRICE_LOCK.acquire(blocking=False):
+        PRICE_LOCK.release()
+        threading.Thread(target=refresh_prices,args=(True,),daemon=True).start()
+    # else: a refresh is already in flight (this request or the background loop) - don't pile on, just use what's on disk right now.
+
 def chart_payload(days=180):
     days=max(30,min(int(days),500)); now=time.time()
     if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
-        try: refresh_prices(False)
-        except Exception: pass
+        refresh_prices_background()   # never block this request on a live network fetch - see function docstring
         dates,closes=load_price_series(); brain=brain_load(); candles=chart_daily_candles(); win=dates[-days:]
         data={"as_of":dates[-1],"days":days,"dates":win,"closes":[round(c,2) for c in closes[-days:]],"candles":[{"d":d,"o":candles[d][0],"h":candles[d][1],"l":candles[d][2],"c":candles[d][3]} for d in win if d in candles],"data_note":price_data_note(),"live_record":chart_live_record()}
         if brain is not None and brain.get("eval"):
@@ -1800,4 +1814,4 @@ if __name__=="__main__":
     threading.Thread(target=keepalive_loop,daemon=True).start()
     port=int(os.environ.get("PORT",8765))
     print(f"Python model server running on port {port}")
-    ThreadingHTTPServer(("0.0.0.0",port),Handler).serve_forever()
+    QuietServer(("0.0.0.0",port),Handler).serve_forever()
