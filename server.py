@@ -313,7 +313,8 @@ TOOLS = [
  {"type":"function","function":{"name":"inspect_holdout","description":"Read metrics from the last held-out evaluation, including confusion counts, false-positive and false-negative rates.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"inspect_market_evaluation","description":"Use for questions about MIRA Nasdaq forecast accuracy, market-model false-positive rates, false negatives, baselines, or holdout scores. Returns the real chronological market-model holdout metrics, not synthetic sandbox results.","parameters":{"type":"object","properties":{},"required":[]}}},
  {"type":"function","function":{"name":"forecast_nasdaq","description":"Train/evaluate next-session direction and 20-session drawdown-risk models on bundled Nasdaq-100 daily history, or on supplied historical prices. Produces an experimental latest-data signal.","parameters":{"type":"object","properties":{},"required":[]}}},
- {"type":"function","function":{"name":"explore_simulation","description":"Run 100 new generated cases in the simulated bank or market environment. Never accesses external systems.","parameters":{"type":"object","properties":{},"required":[]}}}
+ {"type":"function","function":{"name":"explore_simulation","description":"Run 100 new generated cases in the simulated bank or market environment. Never accesses external systems.","parameters":{"type":"object","properties":{},"required":[]}}},
+ {"type":"function","function":{"name":"forecast_overnight_intraday","description":"Tests whether MIRA's QQQ return has come mainly from overnight holding or intraday trading, on a chronological holdout (not hindsight). Use for questions about day-trading, intraday edge, or whether trading during the day adds value.","parameters":{"type":"object","properties":{},"required":[]}}}
 ]
 
 def inspect_market_evaluation():
@@ -626,6 +627,97 @@ def intraday_load():
             try: out.append((r[0],float(r[1]),float(r[2]),float(r[3]),float(r[4])))
             except (ValueError,IndexError): continue
     return out
+
+
+OVERNIGHT_RESULT = None
+
+def forecast_overnight_intraday():
+    """
+    Tests a real, well-documented structural pattern on YOUR OWN intraday
+    data: most of an index ETF's return tends to happen overnight
+    (yesterday's close -> today's open), not during the trading day
+    (today's open -> today's close). This is not a price-direction model -
+    it does not predict up/down. It measures, honestly and out-of-sample,
+    whether staying positioned overnight has been a structurally stronger
+    source of return than actively trading during the day - i.e. it is a
+    test of WHETHER intraday trading activity has had anything to add, not
+    a signal to trade on.
+    """
+    global OVERNIGHT_RESULT
+    bars = intraday_load()
+    if len(bars) < 300:
+        raise ValueError("Not enough hourly bars yet (need ~300+); let intraday_collect() run longer, or widen the Alpaca export's date range.")
+
+    def is_regular(ts):
+        hh = int(ts[11:13])
+        return 13 <= hh <= 20
+
+    by_day = {}
+    for ts, o, h, l, c in bars:
+        if not is_regular(ts):
+            continue
+        day = ts[:10]
+        by_day.setdefault(day, []).append((ts, o, c))
+
+    days = sorted(by_day)
+    daily = []
+    for d in days:
+        session = sorted(by_day[d])
+        daily.append({"date": d, "open": session[0][1], "close": session[-1][2]})
+
+    n = len(daily)
+    if n < 300:
+        raise ValueError("Only %d regular-session trading days found; need at least 300." % n)
+
+    def split_cagr(lo, hi):
+        overnight_cum, intraday_cum = 1.0, 1.0
+        for i in range(max(lo, 1), hi):
+            overnight_cum *= (1 + (daily[i]["open"]/daily[i-1]["close"] - 1))
+            intraday_cum *= (1 + (daily[i]["close"]/daily[i]["open"] - 1))
+        years = (hi - lo) / 252
+        return {
+            "overnight_cagr": overnight_cum ** (1/years) - 1,
+            "intraday_cagr": intraday_cum ** (1/years) - 1,
+            "overnight_multiple": overnight_cum,
+            "intraday_multiple": intraday_cum,
+            "years": years,
+            "start": daily[lo]["date"], "end": daily[hi-1]["date"],
+        }
+
+    full = split_cagr(0, n)
+    cut = int(n * 0.8)
+    fit = split_cagr(0, cut)
+    holdout = split_cagr(cut, n)
+
+    overnight_wins_in_fit = fit["overnight_cagr"] > fit["intraday_cagr"]
+    overnight_wins_in_holdout = holdout["overnight_cagr"] > holdout["intraday_cagr"]
+    confirmed = overnight_wins_in_fit and overnight_wins_in_holdout
+
+    if confirmed:
+        insight = ("Across both the training period and a genuinely unseen holdout period, staying positioned "
+                    "overnight has earned more than the intraday session did, and in the holdout period the gap "
+                    "was large. This does not mean day-trading loses money, and it is not a buy/sell signal for "
+                    "any single day - it means the data gives no evidence that actively trading in and out during "
+                    "the day has added return beyond just holding the position.")
+    else:
+        insight = ("The overnight-vs-intraday split did not hold up consistently between the training period and "
+                    "the holdout period, so this is not a reliable pattern in this data right now.")
+
+    OVERNIGHT_RESULT = {
+        "instrument": "QQQ (hourly, regular session only)",
+        "trading_days": n,
+        "full_history": full,
+        "fit_period": fit,
+        "holdout_period": holdout,
+        "overnight_wins_in_fit": overnight_wins_in_fit,
+        "overnight_wins_in_holdout": overnight_wins_in_holdout,
+        "confirmed_out_of_sample": confirmed,
+        "insight": insight,
+        "not_a_trade_signal": True,
+        "method": "Chronological 80/20 split, no lookahead. Compares close[i-1]->open[i] (overnight) against open[i]->close[i] (intraday) compounded returns, annualized.",
+    }
+    return OVERNIGHT_RESULT
+
 
 def intraday_collect(max_pages=8):
     """Backfill hourly QQQ bars (Alpaca free IEX feed, roughly 2016 onward) on the first run, then append only new ones."""
@@ -1583,6 +1675,7 @@ def run_agent(payload):
             elif name=="inspect_market_evaluation": result=inspect_market_evaluation()
             elif name=="explore_simulation": result=scan()
             elif name=="forecast_nasdaq": result=forecast_nasdaq({"csv":ACTIVE_CSV,"close_col":ACTIVE_TARGET,"instrument":"Nasdaq-100 (NDX/QQQ)"})
+            elif name=="forecast_overnight_intraday": result=forecast_overnight_intraday()
             else: result={"error":"Tool is not allowlisted."}
             compact={k:v for k,v in result.items() if k not in ("trace","logs","holdout_trace","learning_trace")}
             actions.append({"tool":name,"observation":compact})
@@ -1775,6 +1868,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=="/api/brain": result=start_brain_job(force=bool(payload.get("force",True)))
             elif path=="/api/paper-trade/toggle": paper_set_enabled(bool(payload.get("enabled"))); result=paper_summary()
             elif path=="/api/paper-trade/config": result=paper_set_config(payload.get("trade_pct"),payload.get("take_profit_pct"),payload.get("stop_loss_pct"))
+            elif path=="/api/overnight": result=forecast_overnight_intraday()
             elif path=="/api/target": result=target_set(payload.get("pct"),payload.get("by_date",""),payload.get("note",""))
             elif path=="/api/paper-trade/sync": result=paper_sync_to_verdict()
             else: self.send_error(404); return
