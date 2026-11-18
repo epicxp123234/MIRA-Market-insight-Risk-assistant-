@@ -8,7 +8,7 @@ class QuietServer(ThreadingHTTPServer):
         if isinstance(exc,(ConnectionAbortedError,ConnectionResetError,BrokenPipeError,socket.timeout)): return
         super().handle_error(request,client_address)
 from pathlib import Path
-import json, math, random, csv, io, time, os, sqlite3, ctypes
+import json, math, random, csv, io, time, os, sqlite3, ctypes, hmac
 from contextlib import closing
 from datetime import date, datetime, time as dt_time, timezone, timedelta
 from urllib.request import Request, urlopen
@@ -536,7 +536,30 @@ def load_price_series():
         if d>dates[-1]: dates.append(d); closes.append(v)
     return dates,closes
 
+FRED_API_KEY=os.environ.get("FRED_API_KEY","").strip()
+def _fred_api(series_id,start):
+    url="https://api.stlouisfed.org/fred/series/observations?series_id=%s&file_type=json&observation_start=%s&api_key=%s"%(series_id,start,FRED_API_KEY)
+    last_exc=None
+    for attempt in range(3):
+        try:
+            with urlopen(Request(url,headers={"User-Agent":"MIRA-research/1.0"}),timeout=30) as response: raw=json.loads(response.read())
+            break
+        except Exception as exc: last_exc=exc; time.sleep(2*(attempt+1))
+    else: raise last_exc
+    out=[]
+    for o in raw.get("observations",[]):
+        try: v=float(o["value"])
+        except (ValueError,TypeError,KeyError): continue
+        if math.isfinite(v): out.append((o["date"],v))
+    out.sort()
+    return out
+
 def _fred_rows(last_date):
+    if not FRED_API_KEY: return _fred_rows_old(last_date)
+    start=(date.fromisoformat(last_date)-timedelta(days=10)).isoformat()
+    return [(d,v) for d,v in _fred_api("NASDAQ100",start) if v>0]
+
+def _fred_rows_old(last_date):
     start=(date.fromisoformat(last_date)-timedelta(days=10)).isoformat()
     req=Request("https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQ100&cosd="+start,headers={"User-Agent":"MIRA-research/1.0"})
     last_exc=None
@@ -1153,6 +1176,12 @@ MACRO_SERIES_IDS={"yield_10y":"DGS10","credit_spread":"BAMLH0A0HYM2","recession"
 MACRO_CACHE={"at":0.0,"series":{},"errors":{}}
 
 def _fred_series(series_id,cosd="1985-01-01"):
+    if FRED_API_KEY:
+        rows=_fred_api(series_id,cosd)
+        return [d for d,_ in rows],[v for _,v in rows]
+    return _fred_series_old(series_id,cosd)
+
+def _fred_series_old(series_id,cosd="1985-01-01"):
     req=Request("https://fred.stlouisfed.org/graph/fredgraph.csv?id=%s&cosd=%s"%(series_id,cosd),headers={"User-Agent":"MIRA-research/1.0"})
     last_exc=None
     for attempt in range(3):
@@ -1193,7 +1222,7 @@ def macro_row(d):
     yield_chg=(y_now-y_then) if (y_now is not None and y_then is not None) else 0.0
     credit=_macro_value_on("credit_spread",d,0.0)
     rec=_macro_value_on("recession",d,0.0)
-    return [yield_chg,credit,1.0 if rec>=0.5 else 0.0]
+    return [yield_chg,credit,0.0]  # recession flag disabled: NBER announces dates months late, so using it same-day leaks the future
 
 BRAIN_JOB={"running":False,"message":"","error":None,"started":None}
 BRAIN_LOCK=threading.Lock()
@@ -1232,6 +1261,21 @@ def auc_score(ps,ys):
             if pairs[k][1]: rank_sum+=avg
         i=j+1
     return (rank_sum-pos*(pos+1)/2)/(pos*neg)
+
+def auc_block_ci(ps,ys,block=21,n_boot=300,seed=7):
+    """95% range for AUC using a block bootstrap (21-day blocks). Daily rows overlap, so a plain bootstrap would look far too certain."""
+    m=len(ps)
+    if m<block*4: return None
+    rnd=random.Random(seed); starts=list(range(0,m,block)); vals=[]
+    for _ in range(n_boot):
+        bp=[]; by=[]
+        for _b in range(len(starts)):
+            s=rnd.choice(starts); bp.extend(ps[s:s+block]); by.extend(ys[s:s+block])
+        a=auc_score(bp,by)
+        if a is not None: vals.append(a)
+    if len(vals)<50: return None
+    vals.sort()
+    return [vals[int(len(vals)*0.025)],vals[int(len(vals)*0.975)-1]]
 
 def brain_fit_member(train,valid,seed,hidden,max_epochs,label,base,span):
     rnd=random.Random(seed); dim=len(train[0]["x"])
@@ -1275,7 +1319,7 @@ def brain_evaluate_block(closes,ids,probs,thr):
     for i in ids: pos[i]=0.0 if probs[i]>=thr else 1.0
     strat=evaluate_positions(closes,pos,ids[0],ids[-1]+1); hold=evaluate_positions(closes,[1.0]*n,ids[0],ids[-1]+1)
     flagged=[y for p,y in zip(ps,yv) if p>=thr]; calm=[y for p,y in zip(ps,yv) if p<thr]
-    return {"rows":len(ids),"auc":auc_score(ps,yv),"base_rate":sum(yv)/len(yv),"flagged_drop_rate":(sum(flagged)/len(flagged)) if flagged else None,"calm_drop_rate":(sum(calm)/len(calm)) if calm else None,"flagged_share":len(flagged)/len(ids),"strategy":strat,"buy_and_hold":hold,"invested_share":sum(1 for i in ids if pos[i]==1.0)/len(ids)}
+    return {"rows":len(ids),"auc":auc_score(ps,yv),"auc_ci":auc_block_ci(ps,yv),"base_rate":sum(yv)/len(yv),"flagged_drop_rate":(sum(flagged)/len(flagged)) if flagged else None,"calm_drop_rate":(sum(calm)/len(calm)) if calm else None,"flagged_share":len(flagged)/len(ids),"strategy":strat,"buy_and_hold":hold,"invested_share":sum(1 for i in ids if pos[i]==1.0)/len(ids)}
 
 _LABEL_CACHE={}
 def brain_labels_cache(closes):
@@ -1422,19 +1466,20 @@ def build_final_answer(v):
         parts.append("My neural risk brain is not trained yet. I have started training it now (%s). Check the live network panel; it takes a few minutes. Ask again when it finishes."%v["brain_job"])
         parts.append("Until then, the simple trend rule gives an interim view: %s (the index is %.1f%% %s its %d-day average). This is NOT the neural network's call."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n))
         return " ".join(parts)+"\n\nSUMMARY | INTERIM (brain training) | Trend rule: %s | Data as of %s"%(v["trend_verdict"],v["as_of"])
-    parts.append("FINAL: BUY - stay invested in the Nasdaq-100." if v["verdict"]=="BUY" else "FINAL: SELL - get defensive (reduce exposure or move to cash).")
+    parts.append("Model call: BUY (the networks see a normal-risk regime)." if v["verdict"]=="BUY" else "Model call: SELL (the networks see an elevated-risk regime).")
     parts.append("Confidence: %s."%v["confidence"])
     state="above" if v["risk_score"]>=v["alarm_level"] else "below"
     parts.append("Why: my neural networks put the chance of a drop of 8%% or more within about a month at %s. My alarm level is %s, and the score is %s it, so the networks say %s."%(p0(v["risk_score"]),p0(v["alarm_level"]),state,v["brain_verdict"]))
     parts.append("Second opinion: the simple trend rule says %s (the index is %.1f%% %s its %d-day average and %.1f%% %s its 50-day average), so the two %s."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n,abs(v["distance_from_50day_pct"]),"above" if v["distance_from_50day_pct"]>=0 else "below","agree" if v["agree"] else "disagree, so I lowered my confidence"))
     mc=v.get("monte_carlo")
-    if mc: parts.append("Third check, pure statistics: resampling %d real historical %d-day stretches at random (no learning involved), a drop like this happened %s of the time (95%% confidence range %s to %s)."%(mc["simulations"],mc["horizon_days"],p0(mc["probability"]),p0(mc["confidence_95_low"]),p0(mc["confidence_95_high"])))
+    if mc: parts.append("Base-rate check (history, not a prediction): across %d random real %d-day stretches, a drop like this happened %s of the time (95%% confidence range %s to %s)."%(mc["simulations"],mc["horizon_days"],p0(mc["probability"]),p0(mc["confidence_95_low"]),p0(mc["confidence_95_high"])))
     b=v["brain"]; ho=b["holdout"]; s=ho["strategy"]; bh=ho["buy_and_hold"]
     if ho.get("auc") is not None:
-        txt="How good the brain is: on days it never saw during training (%s to %s), its risk score separated stormy from calm periods with a score of %.2f (0.50 would be a coin flip)."%(b["holdout_start"],b["holdout_end"],ho["auc"])
+        txt="How good the brain is: on days it never saw during training (%s to %s), its risk score separated stormy from calm periods with a score of %.2f%s (0.50 would be a coin flip)."%(b["holdout_start"],b["holdout_end"],ho["auc"],(" (95%% range %.2f to %.2f)"%tuple(ho["auc_ci"])) if ho.get("auc_ci") else "")
         if ho.get("flagged_drop_rate") is not None and ho.get("calm_drop_rate") is not None:
             txt+=" When it raised the alarm, a drop of 8%%+ followed %s of the time, versus %s when it did not."%(p0(ho["flagged_drop_rate"]),p0(ho["calm_drop_rate"]))
         if s and bh: txt+=" Following its calls in that test earned %s a year versus %s for buy-and-hold, with a worst drop of %.0f%% versus %.0f%%."%(pct(s["cagr"]),pct(bh["cagr"]),s["max_drawdown"]*100,bh["max_drawdown"]*100)
+        txt+=" Caveat: the brain is re-checked on these same unseen days each time it retrains, so these numbers lean optimistic; the live record below is the clean test."
         parts.append(txt)
     if a:
         parts.append("For this time frame, the index has historically been higher %s of the time and typically moved %s, but in the worst 5%% of cases it fell %s or more."%(p0(a["p_up"]),sg(a["median"]),("%.1f%%" if abs(a["p5"])<0.1 else "%.0f%%")%(abs(a["p5"])*100)))
@@ -1455,7 +1500,7 @@ def build_final_answer(v):
     if v.get("hourly_note"): parts.append(v["hourly_note"])
     if v.get("data_note"): parts.append(v["data_note"])
     parts.append("This is a research tool, not financial advice.")
-    line="SUMMARY | Time frame: %s | FINAL: %s | Confidence: %s | Risk score %s vs alarm %s | Trend rule: %s | Brain test score %s | Data as of %s"%(v["horizon_label"],v["verdict"],v["confidence"],p0(v["risk_score"]),p0(v["alarm_level"]),v["trend_verdict"],("%.2f"%ho["auc"]) if ho.get("auc") is not None else "n/a",v["as_of"])
+    line="SUMMARY | Time frame: %s | Model call: %s | Confidence: %s | Risk score %s vs alarm %s | Trend rule: %s | Brain test score %s | Data as of %s"%(v["horizon_label"],v["verdict"],v["confidence"],p0(v["risk_score"]),p0(v["alarm_level"]),v["trend_verdict"],("%.2f"%ho["auc"]) if ho.get("auc") is not None else "n/a",v["as_of"])
     return " ".join(parts)+"\n\n"+line
 
 def answer_decision(prompt):
@@ -1534,23 +1579,23 @@ def general_answer(prompt):
         else: parts.append("No graded calls have come back wrong yet (or none have been graded long enough to tell).")
         parts.append("New data, including days it got wrong, is included the next time the networks retrain (about every 21 trading days); a retrained version only replaces the current one if it proves better on data it has not seen. The networks don't reason about any one mistake in words - that explanation above is a description of the numbers, not the network's own thinking.")
     elif has("target","goal","how are you doing against","on track"):
-        tools.append("target_progress"); tp=target_progress()
+        tools.append("target_progress"); tp=None
         if tp:
             pr="%+.1f%%"%tp["paper_return_pct"] if tp.get("paper_return_pct") is not None else "not available yet (paper trading isn't on, or hasn't run long enough)"
             bh="%+.1f%%"%tp["buy_and_hold_pct"] if tp.get("buy_and_hold_pct") is not None else "not available"
             parts.append("Target: %+.1f%% by %s (set %s). Paper account so far: %s. Buy-and-hold over the same period: %s. %s"%(tp["target_pct"],tp.get("by_date") or "an unspecified date",tp["set_at"][:10],pr,bh,tp["note_fixed"]))
-        else: parts.append("No target has been set. The owner can set one from their own computer; it would only ever be shown for comparison, never change any trading decision.")
+        else: parts.append("Targets and paper-trading results are private to the owner and are not shown publicly. A target never changes the model's call.")
     elif has("risk","drawdown","crash","drop","fall","correction","danger","safe"):
         tools.append("neural_risk_brain"); v=final_verdict("next month")
         if v.get("interim"): parts.append("The brain is still training; the trend rule says %s for now."%v["trend_verdict"])
         else: parts.append("The networks put the chance of a drop of 8%% or more within about a month at %s. Their alarm level is %s (SELL at or above it), so the call is %s. Drops of that size happened %s of the time historically."%(pc(v["risk_score"]),pc(v["alarm_level"]),v["verdict"],pc(sb.get("drop_base_rate"))))
     elif has("how","work","what are you","what is","explain","neural","network","model","why","who"):
-        parts.append("I'm MIRA, a market research assistant. A small ensemble of neural networks, written in plain Python, reads 13 price-based signals from about 200 years of Nasdaq-100 and index history and estimates the chance of a drop of 8% or more in the next month. At or above its alarm level the call is SELL, otherwise BUY. A simple trend rule gives a second opinion. Each call is logged and graded later, and the networks retrain themselves on new data and only replace themselves if they prove better on unseen days.")
+        parts.append("I'm MIRA, a market research assistant. A small ensemble of neural networks, written in plain Python, reads 13 price-based signals from about 40 years (1986 onward) of Nasdaq-100 and index history and estimates the chance of a drop of 8% or more in the next month. At or above its alarm level the call is SELL, otherwise BUY. A simple trend rule gives a second opinion. Each call is logged and graded later, and the networks retrain themselves on new data and only replace themselves if they prove better on unseen days.")
         parts.append("I can't predict tomorrow's move reliably - nobody can - and I'm not financial advice.")
     else:
         try:
             v=final_verdict("next month")
-            if not v.get("interim"): parts.append("Here is my current view: FINAL %s for the next month (%s confidence), drop risk %s against an alarm level of %s."%(v["verdict"],v["confidence"],pc(v["risk_score"]),pc(v["alarm_level"])))
+            if not v.get("interim"): parts.append("Here is the model's current call: %s for the next month (%s confidence), drop risk %s against an alarm level of %s."%(v["verdict"],v["confidence"],pc(v["risk_score"]),pc(v["alarm_level"])))
         except Exception: pass
         parts.append("You can ask me things like: \"should I buy or sell today / this week / next year?\", \"how accurate are you?\", \"how do you learn?\", \"how fresh is your data?\", \"what is the drop risk?\" or \"how do you work?\".")
     parts.append("Research only, not financial advice.")
@@ -1561,7 +1606,7 @@ LLM_KEY=os.environ.get("ANTHROPIC_API_KEY","")
 LLM_MODEL=os.environ.get("MIRA_LLM_MODEL","claude-haiku-5-5")
 CHAT_HISTORY=[]
 
-def mira_facts():
+def mira_facts(private=False):
     brain=brain_load(); lines=[]
     if brain and brain.get("eval"):
         sb=chart_scoreboard(brain)
@@ -1586,7 +1631,7 @@ def mira_facts():
         if miss: lines.append("Most recent wrong call: "+miss[0]["explanation"])
     except Exception: pass
     try:
-        tp=target_progress()
+        tp=target_progress() if private else None
         if tp:
             pr="%+.1f%%"%tp["paper_return_pct"] if tp.get("paper_return_pct") is not None else "n/a"
             bh="%+.1f%%"%tp["buy_and_hold_pct"] if tp.get("buy_and_hold_pct") is not None else "n/a"
@@ -1594,14 +1639,14 @@ def mira_facts():
     except Exception: pass
     return "\n".join(lines)
 
-LLM_SYSTEM=("You are the chat assistant of MIRA (Market Insight & Risk Assistant). How MIRA works: an ensemble of 3 small neural networks written in plain Python (no libraries) reads 13 price-based signals from about 200 years of Nasdaq-100/index history and estimates the chance of a drop of 8%+ within ~21 trading days; at or above an alarm level (chosen on validation data) the call is SELL, otherwise BUY. A simple trend rule (price vs moving average) is a second opinion. Every call is logged and graded 1 day and 1 month later; the networks retrain about every 21 new trading days and replace themselves only if better on unseen days. Live QQQ prices and hourly bars come from the free Alpaca IEX feed when keys are set; official daily closes come from FRED. The page /live shows candlesticks, the model's calls and whether they were right. The numbers are produced by MIRA's Python networks, never by you. "
+LLM_SYSTEM=("You are the chat assistant of MIRA (Market Insight & Risk Assistant). How MIRA works: an ensemble of 3 small neural networks written in plain Python (no libraries) reads 13 price-based signals from about 40 years (1986 onward) of Nasdaq-100/index history and estimates the chance of a drop of 8%+ within ~21 trading days; at or above an alarm level (chosen on validation data) the call is SELL, otherwise BUY. A simple trend rule (price vs moving average) is a second opinion. Every call is logged and graded 1 day and 1 month later; the networks retrain about every 21 new trading days and replace themselves only if better on unseen days. Live QQQ prices and hourly bars come from the free Alpaca IEX feed when keys are set; official daily closes come from FRED. The page /live shows candlesticks, the model's calls and whether they were right. The numbers are produced by MIRA's Python networks, never by you. "
 "Qwen/Ollama: an optional local language model that only ran on the owner's own PC to explain results in chat; it never makes predictions. On the cloud server it is not installed, so this chat uses you instead. "
 "Rules: answer the user's actual question directly and conversationally in plain words, short. For any statistic use ONLY the facts provided; never invent numbers. Be honest that the model does not beat always-BUY on call accuracy if asked about accuracy, and that no one can reliably predict markets. If asked for a buy/sell decision, give the current call from the facts and mention the time frame limits. This is research, not financial advice; mention that briefly only when giving a view. Questions unrelated to markets or MIRA: answer briefly if harmless, then offer market help.")
 
 def llm_answer(prompt):
     facts=mira_facts()
     msgs=[]
-    for q,a in CHAT_HISTORY[-4:]: msgs+= [{"role":"user","content":q},{"role":"assistant","content":a}]
+    for q,a in (): msgs+= [{"role":"user","content":q},{"role":"assistant","content":a}]
     msgs.append({"role":"user","content":"MIRA's current facts:\n"+facts+"\n\nUser question: "+prompt})
     body=json.dumps({"model":LLM_MODEL,"max_tokens":500,"system":LLM_SYSTEM,"messages":msgs}).encode()
     req=Request("https://api.anthropic.com/v1/messages",data=body,headers={"x-api-key":LLM_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"})
@@ -1618,7 +1663,7 @@ FREE_LLM_NAME=os.environ.get("MIRA_LLM_NAME","").strip()    # model name exactly
 
 def free_llm_answer(prompt):
     msgs=[{"role":"system","content":LLM_SYSTEM}]
-    for q,a in CHAT_HISTORY[-4:]: msgs+=[{"role":"user","content":q},{"role":"assistant","content":a}]
+    for q,a in (): msgs+=[{"role":"user","content":q},{"role":"assistant","content":a}]
     msgs.append({"role":"user","content":"MIRA's current facts:\n"+mira_facts()+"\n\nUser question: "+prompt})
     body=json.dumps({"model":FREE_LLM_NAME,"messages":msgs,"max_tokens":500,"temperature":0.3}).encode()
     req=Request(FREE_LLM_URL,data=body,headers={"Authorization":"Bearer "+FREE_LLM_KEY,"Content-Type":"application/json"})
@@ -1635,7 +1680,7 @@ def ollama_chat(messages):
 def run_agent(payload):
     global ACTIVE_CSV, ACTIVE_TARGET, TASK
     ACTIVE_CSV=payload.get("csv",""); ACTIVE_TARGET=payload.get("target",""); TASK=payload.get("task","bank")
-    prompt=payload.get("prompt","").strip()
+    prompt=payload.get("prompt","").strip()[:1000]
     if not prompt: raise ValueError("Enter a goal for the sandbox agent.")
     if is_decision_question(prompt): return answer_decision(prompt)
     if FREE_LLM_URL and FREE_LLM_KEY and FREE_LLM_NAME:
@@ -1714,7 +1759,7 @@ def chart_scoreboard(brain):
     ho=brain.get("holdout") or {}; br=ho.get("base_rate"); fs=ho.get("flagged_share"); fd=ho.get("flagged_drop_rate"); cd=ho.get("calm_drop_rate")
     if None in (br,fs,fd,cd): return {"available":False}
     tp=fs*fd; tn=(1-fs)*(1-cd)
-    return {"available":True,"days":ho.get("rows"),"auc":ho.get("auc"),"call_accuracy":tp+tn,"always_buy_accuracy":1-br,"drops_caught":(tp/br) if br else None,"alarm_precision":fd,"drop_base_rate":br,"strategy":ho.get("strategy"),"buy_and_hold":ho.get("buy_and_hold"),"alarm_level":brain.get("threshold"),"trained_through":brain.get("trained_through")}
+    return {"available":True,"days":ho.get("rows"),"auc":ho.get("auc"),"auc_ci":ho.get("auc_ci"),"call_accuracy":tp+tn,"always_buy_accuracy":1-br,"drops_caught":(tp/br) if br else None,"alarm_precision":fd,"drop_base_rate":br,"strategy":ho.get("strategy"),"buy_and_hold":ho.get("buy_and_hold"),"alarm_level":brain.get("threshold"),"trained_through":brain.get("trained_through")}
 
 def chart_live_record():
     try: led=json.loads((LEARN_DIR/"ledger.json").read_text(encoding="utf-8"))
@@ -1730,7 +1775,7 @@ def refresh_prices_background():
     # else: a refresh is already in flight (this request or the background loop) - don't pile on, just use what's on disk right now.
 
 def chart_payload(days=180):
-    days=max(30,min(int(days),500)); now=time.time()
+    days=min((30,90,180,365,500),key=lambda k:abs(k-int(days))); now=time.time()
     if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
         refresh_prices_background()   # never block this request on a live network fetch - see function docstring
         dates,closes=load_price_series(); brain=brain_load(); candles=chart_daily_candles(); win=dates[-days:]
@@ -1749,17 +1794,48 @@ def chart_payload(days=180):
     return out
 
 CHAT_RATE={}
+ADMIN_TOKEN=os.environ.get("MIRA_ADMIN_TOKEN","").strip()
 def is_public_request(h):
+    if ADMIN_TOKEN and hmac.compare_digest(h.headers.get("X-Admin-Token","").encode(),ADMIN_TOKEN.encode()): return False
     if any(h.headers.get(k) for k in ("Cf-Connecting-Ip","X-Forwarded-For","X-Real-Ip","Forwarded")): return True
     return h.client_address[0] not in ("127.0.0.1","::1")
 
-def chat_rate_ok(h,limit=15):
+def client_ip(h):
+    cf=(h.headers.get("Cf-Connecting-Ip") or "").strip()
+    if cf: return cf
+    xff=[x.strip() for x in (h.headers.get("X-Forwarded-For") or "").split(",") if x.strip()]
+    return xff[-1] if xff else h.client_address[0]
+
+def rate_ok(h,bucket,limit,global_limit=None):
+    """Per-visitor limit (plus an optional shared limit for everyone) per minute. Uses the proxy-set address, never the client-writable first X-Forwarded-For entry."""
+    now=time.time(); keys=[(bucket,client_ip(h))]; lims=[limit]
+    if global_limit: keys.append((bucket,"*")); lims.append(global_limit)
+    for k,lim in zip(keys,lims):
+        CHAT_RATE[k]=[t for t in CHAT_RATE.get(k,[]) if now-t<60]
+        if len(CHAT_RATE[k])>=lim: return False
+    for k in keys: CHAT_RATE[k].append(now)
+    if len(CHAT_RATE)>4000: CHAT_RATE.clear()
+    return True
+
+def chat_rate_ok(h,limit=15): return rate_ok(h,"chat",limit,global_limit=120)
+
+def _chat_rate_ok_old(h,limit=15):
     ip=h.headers.get("Cf-Connecting-Ip") or (h.headers.get("X-Forwarded-For") or h.client_address[0]).split(",")[0].strip()
     now=time.time(); hits=[t for t in CHAT_RATE.get(ip,[]) if now-t<60]
     if len(hits)>=limit: CHAT_RATE[ip]=hits; return False
     hits.append(now); CHAT_RATE[ip]=hits
     if len(CHAT_RATE)>2000: CHAT_RATE.clear()
     return True
+
+# The /live page is patched on the fly so one server.py carries every fix (no separate edits to live.html needed).
+LIVE_PAGE_FIXES=[
+ (r"""const worse=sb.call_accuracy<sb.always_buy_accuracy;""",
+  r"""const worse=sb.call_accuracy<sb.always_buy_accuracy;const ciFlip=sb.auc_ci&&sb.auc_ci[0]<=0.5;"""),
+ (r"""+'<div class="stat"><b>'+(sb.auc!=null?sb.auc.toFixed(2):'—')+'</b><span>Risk-ranking score (0.50 = coin flip)</span></div>'""",
+  r"""+'<div class="stat '+(ciFlip?'warn':'')+'"><b>'+(sb.auc!=null?sb.auc.toFixed(2):'—')+'</b><span>Risk-ranking score (0.50 = coin flip)'+(sb.auc_ci?' · 95% range '+sb.auc_ci[0].toFixed(2)+'–'+sb.auc_ci[1].toFixed(2):'')+(ciFlip?' — the range includes 0.50, so this is not clearly better than chance':'')+'</span></div>'"""),
+ (r"""<div class="sub">Confidence: <b>""",
+  r"""<div class="sub">Research signal, not advice · Confidence: <b>"""),
+]
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*args,**kwargs):
@@ -1770,7 +1846,22 @@ class Handler(SimpleHTTPRequestHandler):
             f=(DATA_DIR/p[len("/data/"):]).resolve()
             if DATA_DIR.resolve() in f.parents and f.exists(): return str(f)
         return super().translate_path(path)
+    STATIC_OK_SUFFIX=(".html",".css",".js",".png",".jpg",".jpeg",".svg",".ico",".webmanifest",".txt")
+    PUBLIC_DATA_FILES=("/data/nasdaq100_daily.csv","/data/models/nasdaq100_model.json","/data/models/nasdaq100_training_report.json")
+    def static_allowed(self,path):
+        """Only pages, the price CSV and the two model files are public. Source code, learning logs, ledgers and question logs are never served."""
+        low=path.lower()
+        if "%" in low or ".." in low or "\\" in low: return False
+        if low.startswith("/api/") or low in ("/","/live"): return True
+        if low.startswith("/data/"): return low in self.PUBLIC_DATA_FILES
+        return low.endswith(self.STATIC_OK_SUFFIX)
+    def list_directory(self,path):
+        self.send_error(404); return None
     def do_GET(self):
+        path=urlsplit(self.path).path
+        if not self.static_allowed(path): self.send_error(404); return
+        public=is_public_request(self)
+        if public and path.startswith("/api/") and path not in ("/api/status","/api/market-data","/api/ollama") and not rate_ok(self,"get",30): self.send_error(429); return
         path=urlsplit(self.path).path
         if path=="/api/market-data":
             body=json.dumps(fetch_market_snapshot()).encode()
@@ -1788,7 +1879,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/paper-trade":
-            body=json.dumps(paper_summary()).encode()
+            body=json.dumps(paper_summary() if not public else {"enabled":False,"error":"Paper trading is private to the owner."}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/brain":
@@ -1796,12 +1887,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/mistakes":
-            try: body=json.dumps({"mistakes":recent_mistakes(5),"target":target_progress()}).encode()
+            try: body=json.dumps({"mistakes":recent_mistakes(5),"target":(None if public else target_progress())}).encode()
             except Exception as exc: body=json.dumps({"mistakes":[],"target":None,"error":str(exc)[:150]}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/facts":
-            try: body=json.dumps({"facts":mira_facts()}).encode()
+            try: body=json.dumps({"facts":mira_facts(private=not public)}).encode()
             except Exception as exc: body=json.dumps({"facts":"","error":str(exc)[:150]}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
@@ -1812,13 +1903,19 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc: body=json.dumps({"error":str(exc)}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
-        if path=="/live": self.path="/live.html"
+        if path in ("/live","/live.html"):
+            try: html=(ROOT/"live.html").read_text(encoding="utf-8")
+            except OSError: self.send_error(404); return
+            for _old,_new in LIVE_PAGE_FIXES: html=html.replace(_old,_new)
+            body=html.encode("utf-8")
+            self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+            return
         if path=="/api/intraday":
             body=json.dumps({k:v for k,v in INTRADAY_STATE.items()}|{"profile":intraday_profile()}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/prices":
-            body=json.dumps({k:v for k,v in PRICE_STATE.items() if k!="extra"}|{"live_days":[(d,round(v,2),s) for d,v,s in PRICE_STATE["extra"]],"note":price_data_note(),"autopilot":AUTOPILOT}).encode()
+            body=json.dumps({k:v for k,v in PRICE_STATE.items() if k!="extra"}|{"live_days":[(d,round(v,2),s) for d,v,s in PRICE_STATE["extra"]],"note":price_data_note(),"autopilot":(AUTOPILOT if not public else {"last_run":AUTOPILOT["last_run"]})}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/status":
@@ -1829,7 +1926,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         global MARKET_API_KEY, MARKET_API_SECRET, MARKET_CACHE
         try:
-            payload=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))
+            length=int(self.headers.get("Content-Length","0"))
+            if length>(20000 if is_public_request(self) else 8000000): raise PermissionError("Request too large.")
+            payload=json.loads(self.rfile.read(length))
             path=urlsplit(self.path).path
             if is_public_request(self):
                 # Visitors on the public internet (tunnel / cloud host) may only chat. Keys, training and retraining are owner-only (use localhost).
