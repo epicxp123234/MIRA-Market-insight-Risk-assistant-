@@ -8,7 +8,7 @@ class QuietServer(ThreadingHTTPServer):
         if isinstance(exc,(ConnectionAbortedError,ConnectionResetError,BrokenPipeError,socket.timeout)): return
         super().handle_error(request,client_address)
 from pathlib import Path
-import json, math, random, csv, io, time, os, sqlite3, ctypes, hmac
+import json, math, random, csv, io, time, os, sqlite3, ctypes, hmac, threading
 from contextlib import closing
 from datetime import date, datetime, time as dt_time, timezone, timedelta
 from urllib.request import Request, urlopen
@@ -132,12 +132,119 @@ def market_session(now=None):
     if weekday < 4 and clock >= dt_time(20): return "overnight"
     return "closed"
 
+
+MARKET_STREAM={"connected":False,"status":"not started","trade":None,"quote":None,
+               "bar":None,"last_message_at":None,"last_error":None}
+MARKET_STREAM_LOCK=threading.Lock()
+MARKET_STREAM_STARTED=False
+
+def market_stream_snapshot():
+    """Return a fresh regular-session IEX stream snapshot, otherwise None."""
+    if market_session()!="regular session":
+        return None
+    with MARKET_STREAM_LOCK:
+        trade=dict(MARKET_STREAM.get("trade") or {})
+        quote=dict(MARKET_STREAM.get("quote") or {})
+        connected=MARKET_STREAM.get("connected",False)
+    if not connected or not trade.get("t") or trade.get("p") is None:
+        return None
+    try:
+        stamp=datetime.fromisoformat(str(trade["t"]).replace("Z","+00:00"))
+        age=max(0,int((datetime.now(stamp.tzinfo)-stamp).total_seconds()))
+        price=float(trade["p"])
+        if age>10 or price<=0 or not math.isfinite(price): return None
+    except (ValueError,TypeError):
+        return None
+    previous=None
+    cached=MARKET_CACHE.get("data") or {}
+    try: previous=float(cached.get("previous_close")) if cached.get("previous_close") else None
+    except (TypeError,ValueError): previous=None
+    change=(price/previous-1) if previous and previous>0 else None
+    return {"connected":True,"configured":True,"provider":"Alpaca IEX WebSocket · live single-venue stream",
+            "feed":"iex-websocket","symbol":"QQQ","instrument":"Invesco QQQ ETF · Nasdaq-100 proxy",
+            "session":"regular session","freshness":"LIVE" if age<=3 else "RECENT",
+            "last":price,"price_label":"Latest streamed trade","trade_at":trade.get("t"),
+            "age_seconds":age,"bid":quote.get("bp"),"ask":quote.get("ap"),
+            "quote_at":quote.get("t"),"quote_age_seconds":None,
+            "day_change_pct":change,"previous_close":previous,
+            "market_time":datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "streaming":True,
+            "disclaimer":"Live IEX single-venue quote/trade stream. It is not a consolidated all-exchange feed and is not itself a new model forecast."}
+
+def start_market_stream():
+    """Start an optional WebSocket feed. Requires websocket-client; REST polling remains the fallback."""
+    global MARKET_STREAM_STARTED
+    if MARKET_STREAM_STARTED: return
+    if not (MARKET_API_KEY and MARKET_API_SECRET):
+        MARKET_STREAM["status"]="waiting for Alpaca credentials"; return
+    MARKET_STREAM_STARTED=True
+    def worker():
+        try:
+            import websocket
+        except ImportError:
+            MARKET_STREAM["status"]="websocket-client not installed; using Alpaca REST polling"
+            MARKET_STREAM["last_error"]="Install websocket-client to enable the optional stream."
+            return
+        url="wss://stream.data.alpaca.markets/v2/iex"
+        while True:
+            try:
+                def on_open(ws):
+                    MARKET_STREAM["status"]="authenticating"
+                    ws.send(json.dumps({"action":"auth","key":MARKET_API_KEY,"secret":MARKET_API_SECRET}))
+                def on_message(ws,message):
+                    try: items=json.loads(message)
+                    except (TypeError,json.JSONDecodeError): return
+                    if isinstance(items,dict): items=[items]
+                    for item in items:
+                        kind=item.get("T")
+                        if kind=="success" and item.get("msg")=="authenticated":
+                            ws.send(json.dumps({"action":"subscribe","trades":["QQQ"],"quotes":["QQQ"],"bars":["QQQ"]}))
+                            MARKET_STREAM["status"]="authenticated; subscribing"
+                        elif kind=="subscription":
+                            MARKET_STREAM["connected"]=True
+                            MARKET_STREAM["status"]="subscribed to QQQ trades, quotes and minute bars"
+                        elif kind=="t":
+                            with MARKET_STREAM_LOCK:
+                                MARKET_STREAM["trade"]={"t":item.get("t"),"p":item.get("p"),"s":item.get("s")}
+                                MARKET_STREAM["last_message_at"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            MARKET_STREAM["connected"]=True
+                        elif kind=="q":
+                            with MARKET_STREAM_LOCK:
+                                MARKET_STREAM["quote"]={"t":item.get("t"),"bp":item.get("bp"),"ap":item.get("ap")}
+                                MARKET_STREAM["last_message_at"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            MARKET_STREAM["connected"]=True
+                        elif kind in ("b","u"):
+                            with MARKET_STREAM_LOCK:
+                                MARKET_STREAM["bar"]={"t":item.get("t"),"o":item.get("o"),"h":item.get("h"),
+                                                      "l":item.get("l"),"c":item.get("c"),"v":item.get("v")}
+                                MARKET_STREAM["last_message_at"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                def on_error(ws,error):
+                    MARKET_STREAM["last_error"]=str(error)[:180]
+                def on_close(ws,code,message):
+                    MARKET_STREAM["connected"]=False
+                    MARKET_STREAM["status"]="disconnected; reconnecting"
+                app=websocket.WebSocketApp(url,on_open=on_open,on_message=on_message,
+                                           on_error=on_error,on_close=on_close)
+                app.run_forever(ping_interval=20,ping_timeout=10)
+            except Exception as exc:
+                MARKET_STREAM["connected"]=False
+                MARKET_STREAM["last_error"]=str(exc)[:180]
+                MARKET_STREAM["status"]="stream reconnect pending"
+            time.sleep(3)
+    threading.Thread(target=worker,daemon=True).start()
+    MARKET_STREAM["status"]="stream worker started"
+
 def fetch_market_snapshot(force=False):
     global MARKET_CACHE
     if not MARKET_API_KEY or not MARKET_API_SECRET:
         return {"connected":False,"configured":False,"provider":"Alpaca Basic · free IEX","symbol":"QQQ","error":"Connect free Alpaca market-data keys to enable live quotes."}
-    if not force and MARKET_CACHE["data"] and time.time()-MARKET_CACHE["at"] < 3:
-        return MARKET_CACHE["data"]
+    if not force:
+        streamed=market_stream_snapshot()
+        if streamed:
+            MARKET_CACHE={"at":time.time(),"data":streamed}
+            return streamed
+        if MARKET_CACHE["data"] and time.time()-MARKET_CACHE["at"] < 3:
+            return MARKET_CACHE["data"]
     now=eastern_now(); session=market_session(now)
     feed="overnight" if session=="overnight" else "iex"
     req=Request("https://data.alpaca.markets/v2/stocks/QQQ/snapshot?feed="+feed,headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"})
@@ -336,6 +443,186 @@ def parse_date(value):
             except ValueError: pass
     raise ValueError("Could not parse date: "+value)
 
+
+def _clip_probability(p):
+    return min(1.0-1e-6,max(1e-6,float(p)))
+
+def _logit(p):
+    p=_clip_probability(p)
+    return math.log(p/(1.0-p))
+
+def _sigmoid_safe(z):
+    z=max(-30.0,min(30.0,float(z)))
+    return 1.0/(1.0+math.exp(-z))
+
+def _logloss(ps,ys):
+    if not ps: return None
+    return -sum(y*math.log(_clip_probability(p))+(1-y)*math.log(1-_clip_probability(p))
+                for p,y in zip(ps,ys))/len(ps)
+
+def _fit_platt(probabilities,labels,steps=1800,rate=0.025):
+    """Fit a two-parameter logistic calibrator on a chronological calibration slice."""
+    if len(probabilities)<30 or len(set(labels))<2:
+        return {"slope":1.0,"intercept":0.0,"fitted":False}
+    xs=[_logit(p) for p in probabilities]; a=1.0; b=0.0; n=len(xs)
+    for _ in range(steps):
+        ga=0.0; gb=0.0
+        for x,y in zip(xs,labels):
+            e=_sigmoid_safe(a*x+b)-y
+            ga+=e*x; gb+=e
+        # Mild regularization keeps tiny validation samples from producing extreme slopes.
+        a-=rate*(ga/n+0.01*(a-1.0))
+        b-=rate*(gb/n+0.01*b)
+    return {"slope":a,"intercept":b,"fitted":True}
+
+def _apply_platt(p,cal):
+    return _sigmoid_safe(cal.get("slope",1.0)*_logit(p)+cal.get("intercept",0.0))
+
+def _trend_bucket_probabilities(rows, labels, trend_states, alpha=12.0):
+    """Beta-smoothed P(up | trend state), fitted only on the calibration slice."""
+    out={}
+    for state in (0,1):
+        ys=[y for y,s in zip(labels,trend_states) if s==state]
+        out[str(state)]=(sum(ys)+alpha*0.5)/(len(ys)+alpha)
+    return out
+
+def _fuse_probabilities(p_model,p_trend,p_base,weights):
+    wm=float(weights.get("direction",0.0)); wt=float(weights.get("trend",0.0))
+    total=wm+wt
+    if total<=0: return _clip_probability(p_base)
+    wm/=total; wt/=total
+    base=_logit(p_base)
+    return _sigmoid_safe(base+wm*(_logit(p_model)-base)+wt*(_logit(p_trend)-base))
+
+def _block_edge_interval(predictions,labels,baseline_accuracy,block=5,reps=600,seed=2718):
+    """Paired moving-block bootstrap for accuracy edge vs majority baseline."""
+    n=len(labels)
+    if n<40: return None
+    rng=random.Random(seed); starts=list(range(max(1,n-block+1)))
+    vals=[]
+    for _ in range(reps):
+        sampled=[]
+        while len(sampled)<n:
+            st=rng.choice(starts)
+            sampled.extend(range(st,min(n,st+block)))
+        sampled=sampled[:n]
+        acc=sum(int(predictions[i]==labels[i]) for i in sampled)/n
+        vals.append(acc-baseline_accuracy)
+    vals.sort()
+    return [vals[int(0.025*(reps-1))],vals[int(0.975*(reps-1))]]
+
+def build_directional_fusion(eval_model,valid_rows,test_rows,raw_validation,raw_test,
+                             close,full_model,latest_features):
+    """
+    Combine the independently trained directional MLP and a long/defensive
+    trend state. Calibration/weights are fitted on an early validation slice;
+    model selection is judged on the later untouched holdout. Drawdown models
+    are deliberately not treated as directional votes.
+    """
+    if len(valid_rows)<60 or len(test_rows)<40:
+        return {"available":False,"edge_validated":False,"signal":"HOLD / INSUFFICIENT VALIDATION",
+                "reason":"Not enough chronological validation and holdout observations to validate a fused directional signal."}
+    nval=len(valid_rows); cut=max(30,int(nval*0.60))
+    if nval-cut<20: cut=nval-20
+    cal_rows=valid_rows[:cut]; score_rows=valid_rows[cut:]
+    cal_raw=raw_validation[:cut]; score_raw=raw_validation[cut:]
+    # Fixed, interpretable trend rule. Its weights are learned from the same
+    # calibration slice and evaluated only on later validation/holdout rows.
+    trend_n=min(200,max(100,len(close)//4))
+    trend_pos=trend_positions(close,trend_n,0.01)
+    # The caller's raw rows carry dates; map them back to the price index.
+    # `close_dates` is attached below by the caller as row["index"] when possible.
+    # Fallback mapping uses the training example order, which is chronological.
+    def state_for(row,offset):
+        idx=row.get("_price_index")
+        if idx is None:
+            # Each example begins at price index 20 and then advances one row.
+            idx=20+offset
+        if 0<=idx<len(trend_pos) and trend_pos[idx] is not None:
+            return int(trend_pos[idx])
+        return None
+    # Build the row-index map from the source dates without assuming calendar spacing.
+    # The training rows are contiguous daily observations after invalid rows are removed.
+    # Use date strings from raw examples to resolve indices exactly.
+    # A date->index map is populated by the caller on each raw row.
+    cal_states=[state_for(r,i) for i,r in enumerate(cal_raw)]
+    usable=[i for i,s in enumerate(cal_states) if s is not None]
+    if len(usable)<20:
+        return {"available":False,"edge_validated":False,"signal":"HOLD / INSUFFICIENT TREND HISTORY",
+                "reason":"The trend indicator does not have enough warm-up history."}
+    cal_ps=[predict(eval_model,r["x"]) for r in cal_rows]
+    cal_ys=[r["y"] for r in cal_rows]
+    calibrator=_fit_platt(cal_ps,cal_ys)
+    base_rate=(sum(cal_ys)+1.0)/(len(cal_ys)+2.0)
+    trend_states=[cal_states[i] for i in usable]
+    trend_labels=[cal_ys[i] for i in usable]
+    trend_map=_trend_bucket_probabilities(usable,trend_labels,trend_states)
+    model_score_ps=[_apply_platt(predict(eval_model,r["x"]),calibrator) for r in score_rows]
+    score_ys=[r["y"] for r in score_rows]
+    score_states=[state_for(r,cut+i) for i,r in enumerate(score_raw)]
+    score_trend_ps=[trend_map[str(int(st))] if st is not None else base_rate for st in score_states]
+    score_base=[base_rate]*len(score_ys)
+    base_loss=_logloss(score_base,score_ys) or 0.693
+    model_loss=_logloss(model_score_ps,score_ys) or base_loss
+    trend_loss=_logloss(score_trend_ps,score_ys) or base_loss
+    # Small skill floor avoids amplifying noise. Negative skill gets zero weight.
+    skills={"direction":max(0.0,base_loss-model_loss-0.002),
+            "trend":max(0.0,base_loss-trend_loss-0.002)}
+    total=sum(skills.values())
+    weights=({k:v/total for k,v in skills.items()} if total>0 else {"direction":0.0,"trend":0.0})
+    test_model_ps=[_apply_platt(predict(eval_model,r["x"]),calibrator) for r in test_rows]
+    test_ys=[r["y"] for r in test_rows]
+    test_states=[state_for(r,cut+len(score_raw)+i) for i,r in enumerate(raw_test)]
+    test_trend_ps=[trend_map[str(int(st))] if st is not None else base_rate for st in test_states]
+    fused_test=[_fuse_probabilities(pm,pt,base_rate,weights)
+                for pm,pt in zip(test_model_ps,test_trend_ps)]
+    # Baseline is fixed from the earlier calibration slice; do not use holdout labels
+    # to choose the baseline class.
+    baseline_accuracy=max(base_rate,1.0-base_rate)
+    preds=[int(p>=0.5) for p in fused_test]
+    accuracy=sum(int(p==y) for p,y in zip(preds,test_ys))/len(test_ys)
+    tp=sum(1 for p,y in zip(preds,test_ys) if p==1 and y==1)
+    fp=sum(1 for p,y in zip(preds,test_ys) if p==1 and y==0)
+    tn=sum(1 for p,y in zip(preds,test_ys) if p==0 and y==0)
+    fn=sum(1 for p,y in zip(preds,test_ys) if p==0 and y==1)
+    precision=tp/(tp+fp) if tp+fp else 0.0
+    recall=tp/(tp+fn) if tp+fn else 0.0
+    fpr=fp/(fp+tn) if fp+tn else 0.0
+    balanced_accuracy=(recall+(1-fpr))/2
+    edge=accuracy-baseline_accuracy
+    ci=_block_edge_interval(preds,test_ys,baseline_accuracy)
+    # Require positive lower 95% block-bootstrap bound, not merely a green point estimate.
+    validated=bool(ci and ci[0]>0 and total>0)
+    latest_raw=predict(full_model,latest_features)
+    latest_model=_apply_platt(latest_raw,calibrator)
+    latest_state=trend_pos[-1] if trend_pos and trend_pos[-1] is not None else None
+    latest_trend=trend_map.get(str(int(latest_state)),base_rate) if latest_state is not None else base_rate
+    latest_fused=_fuse_probabilities(latest_model,latest_trend,base_rate,weights)
+    if not validated:
+        signal="HOLD / NO VALIDATED DIRECTIONAL EDGE"
+        reason="The later chronological holdout does not show a statistically positive edge over the majority baseline. MIRA reports probabilities but withholds BUY/SELL."
+    elif latest_fused>=0.55:
+        signal="BUY"
+        reason="The calibrated directional ensemble has a validated positive holdout edge and the fused next-session probability is above 55%."
+    elif latest_fused<=0.45:
+        signal="SELL"
+        reason="The calibrated directional ensemble has a validated positive holdout edge and the fused next-session probability is below 45%."
+    else:
+        signal="HOLD / PROBABILITY TOO CLOSE"
+        reason="The directional model has a validated holdout edge, but the current fused probability is too close to neutral."
+    return {"available":True,"edge_validated":validated,"signal":signal,"reason":reason,
+            "as_of":None,"next_session_up_probability":latest_fused,
+            "direction_model_probability":latest_model,"trend_conditional_probability":latest_trend,
+            "trend_state":("BUY" if latest_state==1 else "SELL" if latest_state==0 else "UNAVAILABLE"),
+            "weights":weights,"validation_logloss":{"baseline":base_loss,"direction":model_loss,"trend":trend_loss},
+            "holdout_accuracy":accuracy,"holdout_majority_baseline":baseline_accuracy,
+            "balanced_accuracy":balanced_accuracy,"precision":precision,"recall":recall,
+            "false_positive_rate":fpr,"false_negative_rate":(fn/(fn+tp) if fn+tp else 0.0),
+            "confusion":{"tp":tp,"fp":fp,"tn":tn,"fn":fn},
+            "holdout_edge_pp":edge*100,"holdout_edge_ci_pp":[x*100 for x in ci] if ci else None,
+            "holdout_rows":len(test_rows),"calibration":calibrator,"trend_probability_map":trend_map,
+            "calibration_base_rate":base_rate,"trend_lookback":trend_n,"method":"Platt-calibrated direction MLP + beta-smoothed trend expert; weights from validation log-loss skill; untouched chronological holdout and 5-session block-bootstrap edge interval."}
+
 def forecast_nasdaq(payload):
     global NASDAQ_RESULT, MODEL
     raw=payload.get("csv","")
@@ -364,11 +651,30 @@ def forecast_nasdaq(payload):
     daily=[0.0]+[close[i]/close[i-1]-1 for i in range(1,len(close))]
     def std(vals):
         avg=sum(vals)/len(vals); return math.sqrt(sum((v-avg)**2 for v in vals)/len(vals))
+    # Causal EMA/MACD features. All derivatives are finite differences of
+    # information available at or before session i (never future prices).
+    ema12=[close[0]]; ema26=[close[0]]; macd=[]
+    a12=2.0/13.0; a26=2.0/27.0
+    for value in close[1:]:
+        ema12.append(a12*value+(1-a12)*ema12[-1])
+        ema26.append(a26*value+(1-a26)*ema26[-1])
+    for i in range(len(close)):
+        macd.append((ema12[i]-ema26[i])/close[i])
+    macd_signal=[macd[0]]; a9=2.0/10.0
+    for value in macd[1:]:
+        macd_signal.append(a9*value+(1-a9)*macd_signal[-1])
     def features(i):
         volchange=0.0
         if volume_col and prices[i][2]>0 and prices[i-1][2]>0:
             volchange=max(-3,min(3,math.log(prices[i][2]/prices[i-1][2])))
-        return [daily[i],close[i]/close[i-2]-1,close[i]/close[i-5]-1,close[i]/close[i-10]-1,close[i]/close[i-20]-1,std(daily[i-4:i+1]),std(daily[i-19:i+1]),volchange]
+        ema_slope=(ema12[i]/ema12[i-3]-1) if i>=3 else 0.0
+        prior_slope=(ema12[i-3]/ema12[i-6]-1) if i>=6 else 0.0
+        ema_acceleration=ema_slope-prior_slope
+        macd_histogram=macd[i]-macd_signal[i]
+        return [daily[i],close[i]/close[i-2]-1,close[i]/close[i-5]-1,
+                close[i]/close[i-10]-1,close[i]/close[i-20]-1,
+                std(daily[i-4:i+1]),std(daily[i-19:i+1]),volchange,
+                ema_slope,ema_acceleration,macd_histogram]
     examples=[{"x":features(i),"up":int(close[i+1]>close[i]),"risk":int(min(close[i+1:i+21])<=close[i]*.90),"volatility":int(std(daily[i+1:i+21])>max(std(daily[i-19:i+1])*1.35,1e-6)),"id":prices[i][0].date().isoformat()} for i in range(20,len(close)-20)]
     cut=int(len(examples)*.8)
     # The stress label looks 20 sessions into the future. Leave a 20-row gap
@@ -379,12 +685,15 @@ def forecast_nasdaq(payload):
     raw_fit=examples[:fit_end]
     raw_validation=examples[validation_start:validation_end]
     raw_test=examples[cut:]
+    _price_index_by_date={p[0].date().isoformat():i for i,p in enumerate(prices)}
+    for _row in raw_validation+raw_test:
+        _row["_price_index"]=_price_index_by_date.get(_row["id"])
     if not raw_test: raise ValueError("Not enough dated examples to form a chronological holdout.")
     if len(raw_fit)<30 or len(raw_validation)<30:
         # Small uploaded histories cannot support a separate threshold set.
         raw_fit=examples[:max(1,cut-20)]; raw_validation=[]
-    mean=[sum(o["x"][j] for o in raw_fit)/len(raw_fit) for j in range(8)]
-    scale=[math.sqrt(sum((o["x"][j]-mean[j])**2 for o in raw_fit)/len(raw_fit)) or 1 for j in range(8)]
+    mean=[sum(o["x"][j] for o in raw_fit)/len(raw_fit) for j in range(len(raw_fit[0]["x"]))]
+    scale=[math.sqrt(sum((o["x"][j]-mean[j])**2 for o in raw_fit)/len(raw_fit)) or 1 for j in range(len(raw_fit[0]["x"]))]
     def scaled(items,label,center=None,spread=None):
         center=mean if center is None else center; spread=scale if spread is None else spread
         return [{"x":[(v-center[j])/spread[j] for j,v in enumerate(o["x"])],"y":o[label],"id":o["id"]} for o in items]
@@ -395,7 +704,7 @@ def forecast_nasdaq(payload):
     valid_risk=scaled(raw_validation,"risk")
     valid_vol=scaled(raw_validation,"volatility")
     def fit(data,epochs=55,label="direction",base=0.2,span=0.18,validation=None,patience=8):
-        m={"w1":[[random.uniform(-.15,.15) for _ in range(9)] for _ in range(8)],"w2":[random.uniform(-.15,.15) for _ in range(9)]}
+        m={"w1":[[random.uniform(-.15,.15) for _ in range(len(data[0]["x"])+1)] for _ in range(8)],"w2":[random.uniform(-.15,.15) for _ in range(9)]}
         logs=[];step=max(1,epochs//10);best_loss=float("inf");best_epoch=0;stale=0;best_model=None
         for ep in range(epochs):
             random.shuffle(data);train_pass(m,data,.008/(1+ep*.01))
@@ -425,7 +734,7 @@ def forecast_nasdaq(payload):
             if index==0: first_logs=logs
         # Keep one representative topology for the weight visualizer; predictions average all three.
         return {"members":members,"w1":members[0]["w1"],"w2":members[0]["w2"]},first_logs,best_epochs
-    visible_status("preparing","Building chronological examples and normalizing eight price features.",0.08)
+    visible_status("preparing","Building chronological examples and normalizing 11 price/derivative features.",0.08)
     eval_up,logs,direction_best_epochs=fit_ensemble(train_up,label="direction validation fit",base=0.12,span=0.16,validation=valid_up or None)
     eval_risk,_,stress_best_epochs=fit_ensemble(train_risk,label="drawdown-risk validation fit",base=0.36,span=0.16,validation=valid_risk or None)
     eval_vol,_,volatility_best_epochs=fit_ensemble(train_vol,label="volatility-regime validation fit",base=0.42,span=0.10,validation=valid_vol or None)
@@ -436,32 +745,68 @@ def forecast_nasdaq(payload):
     direction_balanced=(up["recall"]+1-up["fpr"])/2
     stress_balanced=(risk["recall"]+1-risk["fpr"])/2
     # Refit serving models with normalization from their full training history.
-    full_mean=[sum(o["x"][j] for o in examples)/len(examples) for j in range(8)]
-    full_scale=[math.sqrt(sum((o["x"][j]-full_mean[j])**2 for o in examples)/len(examples)) or 1 for j in range(8)]
+    full_mean=[sum(o["x"][j] for o in examples)/len(examples) for j in range(len(examples[0]["x"]))]
+    full_scale=[math.sqrt(sum((o["x"][j]-full_mean[j])**2 for o in examples)/len(examples)) or 1 for j in range(len(examples[0]["x"]))]
     full_up,_,_=fit_ensemble(scaled(examples,"up",full_mean,full_scale),epochs=direction_best_epochs,label="direction final fit",base=0.52,span=0.12)
     full_risk,_,_=fit_ensemble(scaled(examples,"risk",full_mean,full_scale),epochs=stress_best_epochs,label="drawdown-risk final fit",base=0.64,span=0.12)
     full_vol,_,_=fit_ensemble(scaled(examples,"volatility",full_mean,full_scale),epochs=volatility_best_epochs,label="volatility-regime final fit",base=0.76,span=0.12)
     latest=[(v-full_mean[j])/full_scale[j] for j,v in enumerate(features(len(close)-1))]
-    p_up=predict(full_up,latest);p_risk=predict(full_risk,latest);p_volatility=predict(full_vol,latest)
-    if direction_balanced<=.52 or stress_balanced<=.52: signal="HOLD / NO EDGE DETECTED"
-    elif p_up>=.55 and p_risk<.25: signal="BUY BIAS (RESEARCH)"
-    elif p_up<=.45 or p_risk>=.35: signal="SELL / DEFENSIVE BIAS (RESEARCH)"
-    else: signal="HOLD / UNCERTAIN"
+    p_up_raw=predict(full_up,latest);p_risk=predict(full_risk,latest);p_volatility=predict(full_vol,latest)
+    fusion=build_directional_fusion(eval_up,valid_up,test_up,raw_validation,raw_test,
+                                    close,full_up,latest)
+    fusion["as_of"]=prices[-1][0].date().isoformat()
+    signal=fusion["signal"]
+    p_up=fusion.get("next_session_up_probability",p_up_raw)
     try:
         event_rows=list(csv.DictReader((DATA_DIR/"historical_stress_events.csv").open(encoding="utf-8")))
         episode_count=sum(1 for e in event_rows if e["asset"]=="Nasdaq-100" and "drawdown" in e["event_type"])
     except OSError: episode_count=0
     model_dir=DATA_DIR/"models";model_dir.mkdir(exist_ok=True)
-    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"volatility_regime_model":full_vol,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"Three 8 → 8 → 1 neural-network ensembles (9 MLP members total)","ensemble_members":3,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs}}
+    saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change","ema12_slope_3d","ema12_acceleration_3d","normalized_macd_histogram"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"volatility_regime_model":full_vol,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"Three 11 → 8 → 1 neural-network ensembles (9 MLP members total)","ensemble_members":3,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"fusion":fusion}
     (model_dir/"nasdaq100_model.json").write_text(json.dumps(saved,indent=2),encoding="utf-8")
     MODEL=full_up
-    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"volatility_regime_holdout_accuracy":volatility["accuracy"],"volatility_regime_balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"volatility_regime_baseline_accuracy":max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol),"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; 20-session 10% drawdown; elevated forward volatility relative to trailing volatility","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental ensemble outputs; not calibrated, not a trade instruction."}
+    NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"raw_direction_model_probability":round(p_up_raw,5),"direction_model_probability":fusion.get("direction_model_probability"),"fusion":fusion,"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"holdout_direction_accuracy":fusion.get("holdout_accuracy",up["accuracy"]),"raw_model_holdout_direction_accuracy":up["accuracy"],"raw_model_holdout_direction_balanced_accuracy":direction_balanced,"holdout_direction_balanced_accuracy":fusion.get("balanced_accuracy",direction_balanced),"direction_majority_baseline":fusion.get("holdout_majority_baseline",up_base),"direction_edge_vs_baseline_pp":fusion.get("holdout_edge_pp"),"holdout_direction_precision":fusion.get("precision",up["precision"]),"holdout_direction_recall":fusion.get("recall",up["recall"]),"holdout_direction_fpr":fusion.get("false_positive_rate",up["fpr"]),"holdout_direction_fnr":fusion.get("false_negative_rate",up["fnr"]),"direction_confusion":fusion.get("confusion",up["counts"]),"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"volatility_regime_holdout_accuracy":volatility["accuracy"],"volatility_regime_balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"volatility_regime_baseline_accuracy":max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol),"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; 20-session 10% drawdown; elevated forward volatility relative to trailing volatility","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Directional probability is calibrated on a separate validation slice; fusion weights are validation-selected and assessed on an untouched chronological holdout. This does not establish a guaranteed or permanent edge. Research output only."}
     confusion=lambda counts:{"true_positive":counts["tp"],"false_positive":counts["fp"],"true_negative":counts["tn"],"false_negative":counts["fn"]}
     vol_base=max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol)
-    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"volatility_regime":{"holdout_accuracy":volatility["accuracy"],"majority_baseline_accuracy":vol_base,"balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"precision":volatility["precision"],"recall":volatility["recall"],"false_positive_rate":volatility["fpr"],"false_negative_rate":volatility["fnr"],"confusion":confusion(volatility["counts"]),"target":"next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"ensemble_members_per_task":3,"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Three independently seeded neural networks per task; ensemble predictions average member probabilities. Each member uses validation-loss early stopping and the final serving ensemble is refit using selected epoch counts.","limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation block to favor recall. Probabilities are not calibrated. Research output only."}
+    report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"fusion":fusion,"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"direction":{"holdout_accuracy":fusion.get("holdout_accuracy",up["accuracy"]),"majority_baseline_accuracy":fusion.get("holdout_majority_baseline",up_base),"edge_vs_baseline_pp":fusion.get("holdout_edge_pp"),"edge_ci_95_pp":fusion.get("holdout_edge_ci_pp"),"balanced_accuracy":fusion.get("balanced_accuracy",direction_balanced),"precision":fusion.get("precision",up["precision"]),"recall":fusion.get("recall",up["recall"]),"false_positive_rate":fusion.get("false_positive_rate",up["fpr"]),"false_negative_rate":fusion.get("false_negative_rate",up["fnr"]),"confusion":fusion.get("confusion",confusion(up["counts"])),"balanced_accuracy_raw_model":direction_balanced,"precision_raw_model":up["precision"],"recall_raw_model":up["recall"],"false_positive_rate_raw_model":up["fpr"],"false_negative_rate_raw_model":up["fnr"],"confusion_raw_model":confusion(up["counts"]),"raw_model":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"fusion":{"holdout_accuracy":fusion.get("holdout_accuracy"),"majority_baseline_accuracy":fusion.get("holdout_majority_baseline"),"edge_vs_baseline_pp":fusion.get("holdout_edge_pp"),"edge_ci_95_pp":fusion.get("holdout_edge_ci_pp"),"weights":fusion.get("weights"),"edge_validated":fusion.get("edge_validated")}},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"volatility_regime":{"holdout_accuracy":volatility["accuracy"],"majority_baseline_accuracy":vol_base,"balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"precision":volatility["precision"],"recall":volatility["recall"],"false_positive_rate":volatility["fpr"],"false_negative_rate":volatility["fnr"],"confusion":confusion(volatility["counts"]),"target":"next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"ensemble_members_per_task":3,"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change","EMA12 slope","EMA12 acceleration","normalized MACD histogram"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Three independently seeded neural networks per task; ensemble predictions average member probabilities. Each member uses validation-loss early stopping and the final serving ensemble is refit using selected epoch counts.","limitation":"One chronological holdout after a 20-session purge. Direction probabilities are Platt-calibrated on a separate validation slice; fusion weights are selected by validation log-loss skill and judged on the untouched holdout. Holdout results do not guarantee future edge. Research output only."}
     (model_dir/"nasdaq100_training_report.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
-    visible_status("complete","Forecast complete · signal %s · direction %.1f%% · stress risk %.1f%%"%(signal,p_up*100,p_risk*100),1,{"label":"direction forecast","epoch":55,"epochs":55,"model":full_up,"sample":latest})
+    visible_status("complete","Forecast complete · fused signal %s · P(up) %.1f%% · 20-session stress risk %.1f%%"%(signal,p_up*100,p_risk*100),1,{"label":"direction forecast","epoch":55,"epochs":55,"model":full_up,"sample":latest})
     return NASDAQ_RESULT
+
+
+NASDAQ_JOB={"running":False,"message":"Not started","error":None,"trained_through":None}
+NASDAQ_LOCK=threading.Lock()
+
+def _nasdaq_training_worker():
+    try:
+        NASDAQ_JOB.update({"message":"Training directional/risk/volatility ensembles on the latest completed daily dataset.","error":None})
+        result=forecast_nasdaq({})
+        NASDAQ_JOB.update({"message":"Directional fusion refreshed through %s."%result.get("as_of"),"trained_through":result.get("as_of")})
+    except Exception as exc:
+        NASDAQ_JOB.update({"message":"Directional ensemble refresh failed: "+str(exc)[:160],"error":str(exc)[:300]})
+    finally:
+        NASDAQ_JOB["running"]=False
+
+def start_nasdaq_training(force=False):
+    """Train asynchronously; never retrain on every quote or every second."""
+    with NASDAQ_LOCK:
+        if NASDAQ_JOB["running"]:
+            return {"started":False,"message":"Directional ensemble training is already running."}
+        if not force:
+            try:
+                saved=json.loads((DATA_DIR/"models"/"nasdaq100_model.json").read_text(encoding="utf-8"))
+                dates,_=_load_csv_series()
+                idx={d:i for i,d in enumerate(dates)}
+                old=idx.get(saved.get("as_of"),-10**9)
+                if len(dates)-1-old<21:
+                    return {"started":False,"message":"Directional ensemble is current; fewer than 21 new completed sessions."}
+            except (OSError,json.JSONDecodeError,ValueError):
+                pass
+        NASDAQ_JOB["running"]=True
+        NASDAQ_JOB["message"]="Starting directional ensemble refresh."
+    threading.Thread(target=_nasdaq_training_worker,daemon=True).start()
+    return {"started":True,"message":NASDAQ_JOB["message"]}
+
 
 def inspect_dataset():
     if not ACTIVE_CSV.strip(): return {"source":"generated sandbox","note":"No CSV supplied to this agent turn."}
@@ -623,15 +968,22 @@ def refresh_prices(force=False):
         PRICE_STATE["extra"]=extra; PRICE_STATE["last_csv_date"]=last; PRICE_STATE["updated"]=datetime.now().isoformat(timespec="seconds")
         return PRICE_STATE
 
+def official_data_age_days(dates=None):
+    """Calendar age of the last official daily close used by the predictive models."""
+    if dates is None:
+        dates, _ = _load_csv_series()
+    latest = date.fromisoformat(dates[-1])
+    return max(0, (eastern_now().date() - latest).days)
+
 def price_data_note():
-    dates,_=load_price_series(); csv_last=PRICE_STATE.get("last_csv_date") or dates[-1]; et=eastern_now()
+    official_dates,_=_load_csv_series(); csv_last=PRICE_STATE.get("last_csv_date") or official_dates[-1]; et=eastern_now()
     ex=PRICE_STATE.get("extra") or []; note="Data: official daily closes through %s"%csv_last
     if ex:
         live=ex[-1][0]; is_today=(live==et.date().isoformat() and market_session(et)!="closed" and et.time().replace(tzinfo=None)<dt_time(16))
         note+=", plus %d day%s estimated from live QQQ prices through %s%s"%(len(ex),"" if len(ex)==1 else "s",live," (that trading day is not finished, so this estimate can still change)" if is_today else "")
     elif PRICE_STATE["alpaca"]=="not connected": note+=" (connect free Alpaca keys on the Live market data panel to include today's live move)"
     if PRICE_STATE.get("updated"): note+="; auto-update last ran %s (official closes: %s)"%(PRICE_STATE["updated"].replace("T"," "),PRICE_STATE["fred"])
-    lag=(et.date()-date.fromisoformat(dates[-1])).days
+    lag=(et.date()-date.fromisoformat(official_dates[-1])).days
     if lag>4: note+=". WARNING: the newest price is %d days old, so check your internet connection; this answer may be out of date"%lag
     return note+"."
 
@@ -825,7 +1177,7 @@ def intraday_autopilot():
         ab=INTRADAY_STATE["ab"]
         due=INTRADAY_STATE["days"]>=600 and (ab is None or ab.get("status")!="done" or (date.today()-date.fromisoformat(ab["tested_on"])).days>=7)
         if due:
-            dates,closes=load_price_series(); INTRADAY_STATE["ab"]=intraday_ab_test(dates,closes)
+            dates,closes=_load_csv_series(); INTRADAY_STATE["ab"]=intraday_ab_test(dates,closes)
             try: LEARN_DIR.mkdir(parents=True,exist_ok=True); path.write_text(json.dumps(INTRADAY_STATE["ab"]),encoding="utf-8")
             except OSError: pass
 
@@ -903,7 +1255,7 @@ def paper_sync_to_verdict(v=None):
     """Called automatically after each new daily close (only if the owner turned trading on). Moves the PAPER account to match the model's current call, using the owner's own chosen trade size."""
     st=paper_state()
     if not st.get("enabled"): return {"skipped":"paper trading is off"}
-    v=v or final_verdict("tomorrow")
+    v=v or final_verdict("next month")
     if v.get("interim"): return {"skipped":"brain still training"}
     if v.get("verdict")=="HOLD": return {"skipped":"MIRA returned HOLD; no paper order placed"}
     want_long = v["verdict"]=="BUY"
@@ -1020,15 +1372,30 @@ def target_progress():
     return out
 
 def autopilot_once():
-    """Runs without anyone asking: start brain training/retraining when due, and log + grade today's call once per new official close."""
-    dates,closes=load_price_series(); brain=brain_load()
-    if brain is None or (len(closes)-brain.get("checked_rows",0)>=21 and not BRAIN_JOB["running"]): start_brain_job(False)
+    """Refresh both model families asynchronously after new completed daily data arrives."""
+    dates,closes=_load_csv_series(); brain=brain_load()
+    brain_due=(brain is None or brain.get("data_basis")!="official_daily_closes_v1" or
+               len(closes)-brain.get("checked_rows",brain.get("rows_at_training",len(closes)))>=BRAIN_GAP)
+    # Serialize training jobs: the risk brain and nine-MLP directional ensemble
+    # should not compete for a small Render CPU at the same time.
+    if brain_due and not BRAIN_JOB["running"] and not NASDAQ_JOB["running"]:
+        start_brain_job(False)
+    elif not BRAIN_JOB["running"] and not NASDAQ_JOB["running"]:
+        start_nasdaq_training(False)
     try: intraday_autopilot()
     except Exception as exc: INTRADAY_STATE["status"]="hourly learning problem: "+str(exc)[:80]
+    update_directional_ledger(dates,closes,None)  # grade prior forecasts after the next close arrives
+    fusion=load_saved_directional_fusion(dates[-1])
+    if fusion:
+        update_directional_ledger(dates,closes,fusion)  # log today's fresh inference exactly once
     official=PRICE_STATE.get("last_csv_date")
     if brain is not None and official and AUTOPILOT["logged_for"]!=official:
         v=final_verdict("tomorrow"); AUTOPILOT["logged_for"]=official
+<<<<<<< HEAD
         AUTOPILOT["note"]="Logged the %s unified decision (risk status: %s; trend: %s) for %s."%(v.get("verdict"),v.get("risk_classification","unknown"),v.get("trend_verdict","unknown"),v.get("as_of"))
+=======
+        AUTOPILOT["note"]="Logged decision %s; neural risk classification %s; %s confidence; data %s."%(v.get("verdict"),v.get("risk_state",v.get("brain_verdict")),v.get("confidence"),v.get("model_data_as_of",v.get("as_of")))
+>>>>>>> 2d01d22 (Update MIRA market analysis)
         try: paper_sync_to_verdict(v)
         except Exception as exc: AUTOPILOT["note"]+=" Paper-trade sync problem: "+str(exc)[:100]
     AUTOPILOT["last_run"]=datetime.now().isoformat(timespec="seconds")
@@ -1354,7 +1721,7 @@ def train_brain(dates,closes,hidden=8,feature_names=None):
     s_mean,s_scale=brain_stats([feats[i] for i in idx]); allrows=brain_scaled(feats,ys,idx,s_mean,s_scale); serving=[]
     for k,seed in enumerate(BRAIN_SEEDS):
         mem,_=brain_fit_member(allrows,None,seed,hidden,max(8,epochs[k]),"Risk brain final fit %d/3"%(k+1),0.28+0.1*k/3,0.1/3); serving.append(mem)
-    return {"version":2,"created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":feature_names,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"holdout":holdout,"history":[]}
+    return {"version":3,"data_basis":"official_daily_closes_v1","created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":feature_names,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"holdout":holdout,"history":[]}
 
 def brain_risk_now(brain,dates,closes):
     x=select_features(brain_feature_rows(dates,closes)[-1],brain.get("features",BRAIN_FEATURES))
@@ -1366,12 +1733,12 @@ def brain_save(brain):
 def brain_job(force=False):
     """Train the first brain, or retrain on newer data and promote the new version only if it holds up on unseen days."""
     try:
-        dates,closes=load_price_series(); champ=brain_load()
+        dates,closes=_load_csv_series(); champ=brain_load()
         if champ is None:
             BRAIN_JOB["message"]="Training the first neural risk brain..."
             brain=train_brain(dates,closes,8); brain["history"]=[{"date":dates[-1],"event":"first brain trained","holdout_auc":brain["holdout"]["auc"]}]
             brain_save(brain); BRAIN_JOB["message"]="First brain trained."
-        elif not force and len(closes)-champ.get("checked_rows",0)<21:
+        elif not force and len(closes)-champ.get("checked_rows",champ.get("rows_at_training",len(closes)))<BRAIN_GAP:
             BRAIN_JOB["message"]="Brain is up to date."
         else:
             BRAIN_JOB["message"]="Self-improvement: training challengers on newer data..."
@@ -1415,23 +1782,12 @@ def start_brain_job(force=False):
 
 def brain_status():
     b=brain_load()
-    return {"trained":b is not None,"trained_through":(b or {}).get("trained_through"),"alarm_level":(b or {}).get("threshold"),"holdout":(b or {}).get("holdout"),"history":(b or {}).get("history",[])[-5:],"job":dict(BRAIN_JOB)}
+    return {"trained":b is not None,"data_basis":(b or {}).get("data_basis"),"trained_through":(b or {}).get("trained_through"),"alarm_level":(b or {}).get("threshold"),"holdout":(b or {}).get("holdout"),"history":(b or {}).get("history",[])[-5:],"job":dict(BRAIN_JOB)}
 
-def monte_carlo_drop_risk(closes,horizon=None,drop=None,n_sims=3000,seed=12345):
-    """A pure-statistics estimate, with no learning and no neural network involved: draws real historical horizon-day windows at random, each with EQUAL probability of being picked, and reports the share where a drop of that size actually happened. This is 'historical bootstrap' simulation - a standard, honest statistical method, independent of anything the networks learned, used here as a second check on the same question."""
-    horizon=horizon or BRAIN_HORIZON; drop=drop or BRAIN_DROP
-    daily=[closes[i]/closes[i-1]-1 for i in range(1,len(closes))]
-    starts=list(range(0,len(daily)-horizon+1))
-    if len(starts)<100: return None
-    rnd=random.Random(seed); hits=0
-    for _ in range(n_sims):
-        s0=rnd.choice(starts); cum=1.0; worst=1.0
-        for r in daily[s0:s0+horizon]:
-            cum*=(1+r); worst=min(worst,cum)
-        if worst-1<=-drop: hits+=1
-    p=hits/n_sims; se=math.sqrt(p*(1-p)/n_sims)
-    return {"probability":p,"simulations":n_sims,"horizon_days":horizon,"drop_threshold":drop,"confidence_95_low":max(0.0,p-1.96*se),"confidence_95_high":min(1.0,p+1.96*se),"windows_available":len(starts),"method":"historical bootstrap: %d random real past %d-day windows, each drawn with equal probability (1/%d); no learning, no neural network involved"%(n_sims,horizon,len(starts))}
+def monte_carlo_drop_risk(closes,horizon=None,drop=None,n_sims=50000,seed=12345,block_length=5):
+    """Moving-block bootstrap of historical log returns.
 
+<<<<<<< HEAD
 def reconcile_signals(risk_score, alarm_threshold, trend_verdict, horizon_days):
     """Combine independent risk and trend outputs without pretending they predict the same thing.
 
@@ -1464,23 +1820,316 @@ def reconcile_signals(risk_score, alarm_threshold, trend_verdict, horizon_days):
     return {"verdict":trend_verdict, "agree":None, "risk_clear":True,
             "status":"TREND_SIGNAL_RISK_WITHIN_LIMIT",
             "reason":"The trend engine supplies the directional signal; the independent downside-risk model is below its alarm threshold. The risk model does not confirm market direction."}
+=======
+    Resampling contiguous blocks preserves some short-run serial dependence and
+    volatility clustering. The reported interval is Monte Carlo sampling error
+    only; it is not a confidence interval for the true future market probability.
+    """
+    horizon=horizon or BRAIN_HORIZON; drop=drop or BRAIN_DROP
+    if len(closes)<horizon+100 or n_sims<1000: return None
+    log_returns=[]
+    for i in range(1,len(closes)):
+        if closes[i-1]<=0 or closes[i]<=0: continue
+        r=math.log(closes[i]/closes[i-1])
+        if math.isfinite(r): log_returns.append(r)
+    block=max(1,min(int(block_length),horizon))
+    starts=list(range(0,len(log_returns)-block+1))
+    if len(starts)<50: return None
+    rng=random.Random(seed); hits=0; final_returns=[]; max_losses=[]
+    for _ in range(int(n_sims)):
+        path=1.0; worst=1.0; used=0
+        while used<horizon:
+            st=rng.choice(starts)
+            for lr in log_returns[st:st+min(block,horizon-used)]:
+                path*=math.exp(lr); worst=min(worst,path); used+=1
+                if used>=horizon: break
+        final_returns.append(path-1.0)
+        max_losses.append(worst-1.0)
+        if worst<=1.0-drop: hits+=1
+    p=hits/n_sims; se=math.sqrt(p*(1-p)/n_sims)
+    final_sorted=sorted(final_returns); tail_n=max(1,int(0.05*n_sims))
+    return {"probability":p,"simulations":n_sims,"horizon_days":horizon,
+            "drop_threshold":drop,"confidence_95_low":max(0.0,p-1.96*se),
+            "confidence_95_high":min(1.0,p+1.96*se),
+            "final_return_q05":final_sorted[int(.05*(n_sims-1))],
+            "final_return_median":final_sorted[n_sims//2],
+            "final_return_q95":final_sorted[int(.95*(n_sims-1))],
+            "expected_shortfall_5":sum(final_sorted[:tail_n])/tail_n,
+            "block_length":block,"historical_returns":len(log_returns),
+            "method":"moving-block bootstrap of historical log returns; contiguous %d-session blocks; dependence-preserving resampling"%block,
+            "interval_semantics":"95% Monte Carlo simulation-error interval only; excludes parameter, regime and model uncertainty"}
+
+
+def reconcile_signals(risk_state, trend_signal, horizon_days, data_fresh=True, model_fresh=True, fusion=None):
+    """Use validated directional evidence; downside-risk scores remain a separate risk overlay.
+
+    Direction is supplied by the calibrated MLP + trend fusion. The risk model
+    estimates drawdown probability and is never treated as an opposite-direction
+    vote or an automatic BUY veto.
+    """
+    if not data_fresh:
+        return {"verdict":"HOLD","status":"STALE_MARKET_DATA",
+                "reason":"Official market data is stale; MIRA will not publish a current directional decision."}
+    if horizon_days != 1:
+        return {"verdict":"HOLD","status":"HORIZON_UNSUPPORTED",
+                "reason":"The fused directional model is trained for the next session only. MIRA will not relabel a one-session probability as a 21-session forecast."}
+    if not fusion or not fusion.get("available"):
+        return {"verdict":"HOLD","status":"DIRECTIONAL_FUSION_UNAVAILABLE",
+                "reason":"The directional ensemble has not completed its calibrated validation and holdout evaluation."}
+    if not fusion.get("edge_validated"):
+        return {"verdict":"HOLD","status":"NO_VALIDATED_DIRECTIONAL_EDGE",
+                "reason":fusion.get("reason","The holdout has not demonstrated a reliable directional edge over baseline.")}
+    p=fusion.get("next_session_up_probability")
+    try: p=float(p)
+    except (TypeError,ValueError): p=float("nan")
+    if not math.isfinite(p) or not 0.0<=p<=1.0:
+        return {"verdict":"HOLD","status":"INVALID_FUSED_PROBABILITY",
+                "reason":"The fused directional probability failed validation."}
+    if p>=0.55:
+        verdict="BUY"
+    elif p<=0.45:
+        verdict="SELL"
+    else:
+        return {"verdict":"HOLD","status":"PROBABILITY_TOO_CLOSE_TO_NEUTRAL",
+                "reason":"The holdout shows directional skill, but the current fused probability is inside the neutral band."}
+    risk_note=("Downside-risk alert is elevated; this increases risk awareness but does not reverse the directional forecast."
+               if risk_state=="ELEVATED" else
+               "Downside-risk alert is not elevated; this is a separate risk estimate, not confirmation of direction.")
+    return {"verdict":verdict,"status":"FUSED_DIRECTIONAL_EDGE",
+            "reason":fusion.get("reason","Validated directional fusion.")+" "+risk_note}
+
+
+def directional_ledger_path():
+    return LEARN_DIR/"directional_ledger.json"
+
+def update_directional_ledger(dates,closes,fusion):
+    """Grade yesterday's next-session forecast only after the next official close exists."""
+    if fusion and (not fusion.get("available") or fusion.get("as_of")!=dates[-1]):
+        fusion=None
+    path=directional_ledger_path()
+    try: ledger=json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): ledger=[]
+    if not isinstance(ledger,list): ledger=[]
+    idx={d:i for i,d in enumerate(dates)}
+    graded_now=0
+    for entry in ledger:
+        i=idx.get(entry.get("as_of"))
+        if i is not None and i+1<len(closes) and "actual_up" not in entry:
+            entry["actual_up"]=bool(closes[i+1]>closes[i])
+            p=_clip_probability(entry.get("p_fused",0.5))
+            y=int(entry["actual_up"])
+            entry["brier"]=(p-y)**2
+            entry["logloss"]=-(y*math.log(p)+(1-y)*math.log(1-p))
+            if entry.get("signal") in ("BUY","SELL"):
+                entry["direction_correct"]=bool((entry["signal"]=="BUY")==entry["actual_up"])
+            graded_now+=1
+    if fusion and not any(e.get("as_of")==fusion.get("as_of") for e in ledger):
+        ledger.append({"as_of":fusion["as_of"],"p_fused":fusion.get("next_session_up_probability",0.5),
+                       "p_model":fusion.get("direction_model_probability",0.5),
+                       "p_trend":fusion.get("trend_conditional_probability",0.5),
+                       "signal":fusion.get("signal","HOLD"),
+                       "weights":fusion.get("weights",{}),"edge_validated":fusion.get("edge_validated",False)})
+    try:
+        LEARN_DIR.mkdir(parents=True,exist_ok=True)
+        tmp=path.with_suffix(".json.tmp");tmp.write_text(json.dumps(ledger[-5000:],indent=1),encoding="utf-8");os.replace(tmp,path)
+    except OSError:
+        return {"logged":False,"graded":graded_now}
+    matured=[e for e in ledger if "actual_up" in e]
+    return {"logged":True,"graded":graded_now,"matured":len(matured),
+            "brier":(sum(e["brier"] for e in matured[-126:])/len(matured[-126:])) if matured else None}
+
+def apply_live_directional_weight_adjustment(fusion):
+    """Small, shrinkage-controlled expert-weight update from matured real outcomes."""
+    try: ledger=json.loads(directional_ledger_path().read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): return fusion
+    matured=[e for e in ledger if "actual_up" in e and e.get("p_model") is not None and e.get("p_trend") is not None][-126:]
+    if len(matured)<40:
+        fusion["online_weight_update"]={"applied":False,"matured_observations":len(matured),
+                                        "reason":"At least 40 matured next-session outcomes are required."}
+        return fusion
+    ys=[int(e["actual_up"]) for e in matured]
+    base=(sum(ys)+1.0)/(len(ys)+2.0)
+    lm=_logloss([e["p_model"] for e in matured],ys)
+    lt=_logloss([e["p_trend"] for e in matured],ys)
+    lb=_logloss([base]*len(ys),ys)
+    live_skill={"direction":max(0.0,lb-lm-0.002),"trend":max(0.0,lb-lt-0.002)}
+    total=sum(live_skill.values())
+    if total<=0:
+        fusion["online_weight_update"]={"applied":False,"matured_observations":len(matured),
+                                        "reason":"Recent live outcomes show no positive expert skill over the baseline."}
+        return fusion
+    live_w={k:v/total for k,v in live_skill.items()}
+    prior=fusion.get("weights") or {"direction":0.5,"trend":0.5}
+    # 75% validation weights + 25% live matured-outcome evidence.
+    updated={k:0.75*float(prior.get(k,0.0))+0.25*live_w.get(k,0.0) for k in ("direction","trend")}
+    norm=sum(updated.values())
+    if norm>0: updated={k:v/norm for k,v in updated.items()}
+    fusion["weights"]=updated
+    p=_fuse_probabilities(fusion.get("direction_model_probability",0.5),
+                          fusion.get("trend_conditional_probability",0.5),
+                          fusion.get("calibration_base_rate",0.5),updated)
+    fusion["next_session_up_probability"]=p
+    if fusion.get("edge_validated"):
+        fusion["signal"]="BUY" if p>=0.55 else "SELL" if p<=0.45 else "HOLD / PROBABILITY TOO CLOSE"
+    fusion["online_weight_update"]={"applied":True,"matured_observations":len(matured),
+                                    "live_weights":live_w,"validation_live_blend":updated,
+                                    "live_logloss":{"baseline":lb,"direction":lm,"trend":lt},
+                                    "shrinkage":"75% validation / 25% matured live outcomes"}
+    return fusion
+
+
+def load_saved_directional_fusion(as_of):
+    """Infer today's next-session probability from the last validated saved model."""
+    try:
+        saved=json.loads((DATA_DIR/"models"/"nasdaq100_model.json").read_text(encoding="utf-8"))
+        fusion=dict(saved.get("fusion") or {})
+        if not fusion.get("available") or len(saved.get("features") or [])!=11:
+            return None
+        dates,closes=_load_csv_series()
+        if dates[-1]!=as_of or len(closes)<252:
+            return None
+        index={d:i for i,d in enumerate(dates)}
+        trained_index=index.get(saved.get("as_of"))
+        if trained_index is None:
+            return None
+        rows_since=len(dates)-1-trained_index
+        if rows_since>21:
+            return None
+        # Match the training-time volume feature where a usable volume column exists.
+        volume=[0.0]*len(dates)
+        try:
+            with _csv_path().open(encoding="utf-8-sig") as f:
+                reader=csv.DictReader(f)
+                headers=[h.strip() for h in (reader.fieldnames or [])]
+                vcol=next((h for h in headers if h.lower() in ("volume","vol")),None)
+                dcol=next((h for h in headers if h.lower() in ("date","datetime","timestamp","time","observation_date")),None)
+                if vcol and dcol:
+                    by_date={}
+                    for row in reader:
+                        try: by_date[parse_date(row[dcol]).date().isoformat()]=float(str(row[vcol]).replace(",","").strip() or 0)
+                        except (ValueError,TypeError,KeyError): pass
+                    volume=[by_date.get(d,0.0) for d in dates]
+        except OSError:
+            pass
+        daily=[0.0]+[closes[k]/closes[k-1]-1 for k in range(1,len(closes))]
+        def std(vals):
+            avg=sum(vals)/len(vals)
+            return math.sqrt(sum((z-avg)**2 for z in vals)/len(vals))
+        ema12=[closes[0]];ema26=[closes[0]]
+        a12=2.0/13.0;a26=2.0/27.0
+        for value in closes[1:]:
+            ema12.append(a12*value+(1-a12)*ema12[-1])
+            ema26.append(a26*value+(1-a26)*ema26[-1])
+        macd=[(ema12[k]-ema26[k])/closes[k] for k in range(len(closes))]
+        signal_line=[macd[0]];a9=2.0/10.0
+        for value in macd[1:]:
+            signal_line.append(a9*value+(1-a9)*signal_line[-1])
+        k=len(closes)-1
+        volchange=0.0
+        if k>0 and volume[k]>0 and volume[k-1]>0:
+            volchange=max(-3,min(3,math.log(volume[k]/volume[k-1])))
+        ema_slope=(ema12[k]/ema12[k-3]-1) if k>=3 else 0.0
+        prior_slope=(ema12[k-3]/ema12[k-6]-1) if k>=6 else 0.0
+        x=[daily[k],closes[k]/closes[k-2]-1,closes[k]/closes[k-5]-1,
+           closes[k]/closes[k-10]-1,closes[k]/closes[k-20]-1,
+           std(daily[k-4:k+1]),std(daily[k-19:k+1]),volchange,
+           ema_slope,ema_slope-prior_slope,macd[k]-signal_line[k]]
+        mean=saved.get("mean") or [];scale=saved.get("scale") or []
+        if len(x)!=len(mean) or len(x)!=len(scale): return None
+        z=[(x[q]-mean[q])/(scale[q] or 1.0) for q in range(len(x))]
+        p_raw=predict(saved["direction_model"],z)
+        p_model=_apply_platt(p_raw,fusion.get("calibration") or {})
+        trend_n=int(fusion.get("trend_lookback",200))
+        trend_state=trend_positions(closes,trend_n,0.01)[-1]
+        base=float(fusion.get("calibration_base_rate",0.5))
+        trend_map=fusion.get("trend_probability_map") or {}
+        p_trend=trend_map.get(str(int(trend_state)),base) if trend_state is not None else base
+        fusion["direction_model_probability"]=p_model
+        fusion["raw_direction_model_probability"]=p_raw
+        fusion["trend_conditional_probability"]=p_trend
+        fusion["trend_state"]="BUY" if trend_state==1 else "SELL" if trend_state==0 else "UNAVAILABLE"
+        fusion["as_of"]=as_of
+        fusion["trained_through"]=saved.get("as_of")
+        fusion["rows_since_training"]=rows_since
+        fusion=apply_live_directional_weight_adjustment(fusion)
+        p_fused=_fuse_probabilities(p_model,p_trend,base,fusion.get("weights") or {})
+        fusion["next_session_up_probability"]=p_fused
+        if fusion.get("edge_validated"):
+            if p_fused>=0.55:
+                fusion["signal"]="BUY";fusion["reason"]="Validated holdout edge; current calibrated fusion P(up) is at least 55%."
+            elif p_fused<=0.45:
+                fusion["signal"]="SELL";fusion["reason"]="Validated holdout edge; current calibrated fusion P(up) is at most 45%."
+            else:
+                fusion["signal"]="HOLD / PROBABILITY TOO CLOSE"
+                fusion["reason"]="Validated holdout edge exists, but current P(up) is inside the neutral band."
+        else:
+            fusion["signal"]="HOLD / NO VALIDATED DIRECTIONAL EDGE"
+            fusion["reason"]="The last untouched holdout did not establish a positive directional edge; current probability is shown for research, not as a directional call."
+        return fusion
+    except (OSError,json.JSONDecodeError,KeyError,TypeError,ValueError,IndexError,ZeroDivisionError):
+        return None
+
+>>>>>>> 2d01d22 (Update MIRA market analysis)
 
 def final_verdict(prompt=""):
     h,label,defaulted=parse_horizon(prompt)
-    try: refresh_prices(False)
-    except Exception: pass
-    dates,closes=load_price_series()
+    try:
+        refresh_prices(False)
+    except Exception:
+        pass
+
+    # Predictive models use official daily closes only. Intraday/estimated QQQ
+    # quotes remain a separate display feed and are never mixed into daily features.
+    dates,closes=_load_csv_series()
+    data_age=official_data_age_days(dates)
+    data_fresh=data_age <= 4
     brain=brain_load()
-    if brain is not None and not BRAIN_JOB["running"] and len(closes)-brain.get("checked_rows",0)>=21: start_brain_job(False)   # self-improvement runs in the background
-    rule,learn_note,tested=self_improve(dates,closes); n,band=rule
-    pos=trend_positions(closes,n,band); trend_verdict="BUY" if pos[-1]==1 else "SELL"
-    dist=closes[-1]/(sum(closes[-n:])/n)-1; d50=closes[-1]/(sum(closes[-50:])/50)-1
-    start=eval_start(dates); everyday=horizon_stats(closes,[1.0]*len(closes),start,h,None)
-    out={"as_of":dates[-1],"data_note":price_data_note(),"hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,"horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,"trend_rule":{"average_days":n,"band_pct":band*100},"distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),"self_check":learn_note,"brain":None,"monte_carlo":monte_carlo_drop_risk(closes,h if h>=5 else BRAIN_HORIZON,BRAIN_DROP),"risk_horizon_days":BRAIN_HORIZON,"risk_horizon_note":"The neural risk score uses its trained fixed horizon; it is not automatically changed when the requested outlook horizon changes."}
+    rows_since_check=(len(closes)-brain.get("checked_rows",brain.get("rows_at_training",len(closes)))) if brain else None
+    model_fresh=brain is not None and brain.get("data_basis")=="official_daily_closes_v1" and rows_since_check < BRAIN_GAP
+
     if brain is None:
         started=start_brain_job(False)
-        out.update({"verdict":"HOLD","confidence":"Low","interim":True,"decision_status":"BRAIN_UNAVAILABLE","decision_reason":"The neural risk model is not trained yet. The trend rule is shown as provisional context only; no final BUY/SELL call is issued.","provisional_trend_verdict":trend_verdict,"brain_job":started["message"],"agree":False})
+        fusion=load_saved_directional_fusion(dates[-1])
+        decision=reconcile_signals("UNKNOWN",None,h,data_fresh=data_fresh,model_fresh=False,fusion=fusion)
+        return {"as_of":dates[-1],"model_data_as_of":dates[-1],"model_data_source":"official daily closes only",
+                "data_age_calendar_days":data_age,"data_fresh":data_fresh,"data_note":price_data_note(),
+                "hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,
+                "horizon_defaulted":defaulted,"horizon_all":None,"trend_verdict":None,
+                "trend_rule":None,"distance_from_average_pct":None,"distance_from_50day_pct":None,
+                "self_check":"Neural downside-risk model is not trained.","brain":None,"monte_carlo":None,
+                "verdict":decision["verdict"],"confidence":"Low","interim":False,
+                "decision_status":decision["status"],"decision_reason":decision["reason"],
+                "fusion":fusion,"brain_job":started["message"],"agree":None,"risk_state":"UNKNOWN",
+                "risk_model_fresh":False}
+
+    if not model_fresh and not BRAIN_JOB["running"]:
+        start_brain_job(False)
+
+    rule,learn_note,tested=self_improve(dates,closes)
+    n,band=rule
+    pos=trend_positions(closes,n,band)
+    trend_verdict="BUY" if pos[-1]==1 else "SELL"
+    dist=closes[-1]/(sum(closes[-n:])/n)-1
+    d50=closes[-1]/(sum(closes[-50:])/50)-1
+    start=eval_start(dates)
+    everyday=horizon_stats(closes,[1.0]*len(closes),start,h,None)
+
+    # If inputs/model are stale, don't compute or publish a seemingly current call.
+    if not data_fresh:
+        fusion=load_saved_directional_fusion(dates[-1])
+        decision=reconcile_signals(None,trend_verdict,h,data_fresh=False,model_fresh=model_fresh,fusion=fusion)
+        out={"as_of":dates[-1],"model_data_as_of":dates[-1],"model_data_source":"official daily closes only",
+             "data_age_calendar_days":data_age,"data_fresh":data_fresh,"data_note":price_data_note(),
+             "hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,
+             "horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,
+             "trend_rule":{"average_days":n,"band_pct":band*100},
+             "distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),
+             "self_check":learn_note,"brain":None,"monte_carlo":None,"verdict":"HOLD",
+             "confidence":"Low","interim":False,"agree":False,"decision_status":decision["status"],
+             "decision_reason":decision["reason"],"risk_state":"UNKNOWN",
+             "brain_job":dict(BRAIN_JOB),"live_record":chart_live_record()}
         return out
+<<<<<<< HEAD
     p=brain_risk_now(brain,dates,closes); thr=brain["threshold"]
     risk_alert=bool(p>=thr)
     # Legacy BUY/SELL encoding is retained only inside the historical risk ledger:
@@ -1525,35 +2174,110 @@ def build_final_answer(v):
     if v.get("decision_status")=="RISK_VETO": parts.append("Reconciliation: RISK VETO. The downside-risk score reached its alarm threshold, so MIRA returns HOLD. The trend signal is contextual only.")
     elif v.get("decision_status")=="HORIZON_UNSUPPORTED": parts.append("Reconciliation: the requested horizon is beyond 63 trading days. MIRA returns HOLD because its directional timing signal is not validated that far ahead.")
     elif v.get("decision_status")=="TREND_SIGNAL_RISK_WITHIN_LIMIT": parts.append("Reconciliation: the trend rule supplies direction and the independent risk model is below its alarm threshold. This is not confirmation from two directional models.")
+=======
+
+    try:
+        p=float(brain_risk_now(brain,dates,closes))
+        thr=float(brain["threshold"])
+        if not (math.isfinite(p) and math.isfinite(thr) and 0.0 <= p <= 1.0 and 0.0 < thr < 1.0):
+            raise ValueError("Risk model returned an invalid probability or threshold.")
+    except Exception as exc:
+        fusion=load_saved_directional_fusion(dates[-1])
+        decision=reconcile_signals("UNKNOWN",trend_verdict,h,data_fresh=True,model_fresh=False,fusion=fusion)
+        return {"as_of":dates[-1],"model_data_as_of":dates[-1],"model_data_source":"official daily closes only",
+                "data_age_calendar_days":data_age,"data_fresh":True,"data_note":price_data_note(),
+                "hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,
+                "horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,
+                "verdict":decision["verdict"],"confidence":"Low","interim":False,"agree":None,
+                "decision_status":decision["status"],"decision_reason":decision["reason"],
+                "risk_state":"UNKNOWN","fusion":fusion,"risk_model_error":str(exc)[:120],
+                "live_record":chart_live_record(),"trend_rule":{"average_days":n,"band_pct":band*100},
+                "distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2)}
+
+    risk_state="ELEVATED" if p >= thr else "NORMAL"
+    # Legacy field retained for existing dashboard consumers. This is a risk
+    # classification only: SELL means elevated risk, BUY means normal risk.
+    brain_verdict="SELL" if risk_state=="ELEVATED" else "BUY"
+    fusion=load_saved_directional_fusion(dates[-1])
+    decision=reconcile_signals(risk_state,trend_verdict,h,data_fresh=True,model_fresh=model_fresh,fusion=fusion)
+    # Directional confidence is tied to the fused holdout evidence, not the risk score.
+    confidence="Low"
+    live=update_ledger(dates,closes,brain_verdict,confidence,p,thr)
+    out={"as_of":dates[-1],"model_data_as_of":dates[-1],"model_data_source":"official daily closes only",
+         "data_age_calendar_days":data_age,"data_fresh":True,"data_note":price_data_note(),
+         "hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,
+         "horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,
+         "trend_rule":{"average_days":n,"band_pct":band*100},
+         "distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),
+         "self_check":learn_note,"brain_verdict":brain_verdict,"risk_state":risk_state,
+         "risk_score":p,"alarm_level":thr,"risk_horizon_days":BRAIN_HORIZON,
+         "verdict":decision["verdict"],"confidence":confidence,"interim":False,
+         "agree":decision["status"]!="RISK_VETO","risk_trend_alignment":("ELEVATED_RISK_WITH_POSITIVE_TREND" if risk_state=="ELEVATED" and trend_verdict=="BUY" else "ELEVATED_RISK_WITH_DEFENSIVE_TREND" if risk_state=="ELEVATED" and trend_verdict=="SELL" else "NO_DOWNSIDE_ALARM"),
+         "decision_status":decision["status"],"decision_reason":decision["reason"],
+         "brain":{"trained_through":brain.get("trained_through"),"hidden":brain.get("hidden"),
+                  "holdout":brain.get("holdout"),"holdout_start":brain.get("eval",{}).get("holdout_start"),
+                  "holdout_end":brain.get("eval",{}).get("holdout_end"),"history":brain.get("history",[])[-3:]},
+         "live_record":live,"job":dict(BRAIN_JOB),
+         "monte_carlo":monte_carlo_drop_risk(closes,BRAIN_HORIZON,BRAIN_DROP)}
+    return out
+
+def build_final_answer(v):
+    pct=lambda x:"%.1f%%"%(x*100)
+    p0=lambda x:"n/a" if x is None else "%.0f%%"%(x*100)
+    h=v.get("horizon_days",21); label=v.get("horizon_label","the next month")
+    parts=["Decision horizon: %s."%label]
+    if v.get("horizon_defaulted"):
+        parts.append("No horizon was specified, so MIRA used its default 21-trading-day window.")
+    if v.get("interim") or (v.get("risk_state")=="UNKNOWN" and v.get("verdict")=="HOLD"):
+        parts.append("Decision: HOLD. "+v.get("decision_reason","A required model is unavailable or invalid."))
+        if v.get("trend_verdict"):
+            parts.append("Trend context only: %s. This is not a final signal."%v["trend_verdict"])
+        if v.get("brain_job"):
+            parts.append("Training status: %s."%v["brain_job"])
+        return " ".join(parts)+"\n\nSUMMARY | HOLD | Status: %s | Official model data: %s"%(v.get("decision_status","UNAVAILABLE"),v.get("model_data_as_of",v.get("as_of","unknown")))
+
+    verdict=v.get("verdict","HOLD")
+    parts.append("MIRA decision: %s."%verdict)
+    parts.append("Reason: "+v.get("decision_reason","No additional reason was supplied."))
+    parts.append("Trend engine context: %s."%v.get("trend_verdict","unavailable"))
+    fusion=v.get("fusion") or {}
+    if fusion:
+        parts.append("Unified directional ensemble: calibrated next-session up probability %s; directional-model contribution %s; trend contribution %s; validation weights %s. Held-out edge versus majority baseline: %s percentage points (95%% block-bootstrap interval %s)."%(
+            p0(fusion.get("next_session_up_probability")),
+            p0(fusion.get("direction_model_probability")),
+            p0(fusion.get("trend_conditional_probability")),
+            fusion.get("weights","unavailable"),
+            ("%.2f"%fusion.get("holdout_edge_pp")) if fusion.get("holdout_edge_pp") is not None else "n/a",
+            fusion.get("holdout_edge_ci_pp","unavailable")))
+    parts.append("Neural downside-risk state: %s. Estimated probability of an 8%%+ drawdown over %s trading days: %s; alarm threshold: %s."%(v.get("risk_state","UNKNOWN"),v.get("risk_horizon_days",BRAIN_HORIZON),p0(v.get("risk_score")),p0(v.get("alarm_level"))))
+    if v.get("distance_from_average_pct") is not None:
+        n=v.get("trend_rule",{}).get("average_days","n/a")
+        parts.append("Price is %.2f%% %s its %s-day trend average and %.2f%% %s its 50-day average."%(abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n,abs(v["distance_from_50day_pct"]),"above" if v["distance_from_50day_pct"]>=0 else "below"))
+    parts.append("Directional confidence is based on the calibrated fusion holdout, not on the downside-risk score. The risk model remains a separate risk estimator, not a directional forecaster.")
+    parts.append("Model inputs: official daily closes through %s. Alpaca live quotes are displayed separately; the current daily-trained directional model does not claim to ingest them millisecond-by-millisecond."%v.get("model_data_as_of",v.get("as_of","unknown")))
+>>>>>>> 2d01d22 (Update MIRA market analysis)
     mc=v.get("monte_carlo")
-    if mc: parts.append("Base-rate check (history, not a prediction): across %d random real %d-day stretches, a drop like this happened %s of the time (95%% confidence range %s to %s)."%(mc["simulations"],mc["horizon_days"],p0(mc["probability"]),p0(mc["confidence_95_low"]),p0(mc["confidence_95_high"])))
-    b=v["brain"]; ho=b["holdout"]; s=ho["strategy"]; bh=ho["buy_and_hold"]
+    if mc:
+        parts.append("Historical base-rate check (not a prediction): an 8%%+ drawdown occurred in %.1f%% of %d sampled %d-day historical windows (approximate 95%% interval %.1f%%–%.1f%%)."%(100*mc["probability"],mc["simulations"],mc["horizon_days"],100*mc["confidence_95_low"],100*mc["confidence_95_high"]))
+    ho=(v.get("brain") or {}).get("holdout") or {}
     if ho.get("auc") is not None:
-        txt="How good the brain is: on days it never saw during training (%s to %s), its risk score separated stormy from calm periods with a score of %.2f%s (0.50 would be a coin flip)."%(b["holdout_start"],b["holdout_end"],ho["auc"],(" (95%% range %.2f to %.2f)"%tuple(ho["auc_ci"])) if ho.get("auc_ci") else "")
-        if ho.get("flagged_drop_rate") is not None and ho.get("calm_drop_rate") is not None:
-            txt+=" When it raised the alarm, a drop of 8%%+ followed %s of the time, versus %s when it did not."%(p0(ho["flagged_drop_rate"]),p0(ho["calm_drop_rate"]))
-        if s and bh: txt+=" Following its calls in that test earned %s a year versus %s for buy-and-hold, with a worst drop of %.0f%% versus %.0f%%."%(pct(s["cagr"]),pct(bh["cagr"]),s["max_drawdown"]*100,bh["max_drawdown"]*100)
-        txt+=" Caveat: the brain is re-checked on these same unseen days each time it retrains, so these numbers lean optimistic; the live record below is the clean test."
-        parts.append(txt)
-    if a:
-        parts.append("For this time frame, the index has historically been higher %s of the time and typically moved %s, but in the worst 5%% of cases it fell %s or more."%(p0(a["p_up"]),sg(a["median"]),("%.1f%%" if abs(a["p5"])<0.1 else "%.0f%%")%(abs(a["p5"])*100)))
-    if h<=1: parts.append("Tomorrow is close to a coin flip for any method, so a day trader should not lean on this call; the brain looks about a month ahead.")
-    elif h<=5: parts.append("A week ahead is still mostly noise, so treat this as a mild lean only.")
-    elif h>63: parts.append("No timing signal has been established for this horizon; MIRA therefore reports HOLD rather than extrapolating a short-horizon model.")
-    r=v["live_record"]["graded"]
-    if r["n"]>=1: parts.append("Live neural risk record: %d call%s graded, the risk call was right %s of the time (always saying BUY would be right %s). This grades the neural drawdown warning, not the reconciled HOLD/BUY/SELL decision."%(r["n"],"" if r["n"]==1 else "s",pct(r["hit_rate"]),pct(r["always_buy_rate"])))
-    else: parts.append("Live neural risk record: %d call%s logged; each is graded after 1 day and after a month against what the market really did."%(v["live_record"]["calls_logged"],"" if v["live_record"]["calls_logged"]==1 else "s"))
-    hist=b.get("history") or []
-    if hist:
-        last=hist[-1]
-        if last.get("event")=="self-improvement check": parts.append("Self-improvement: last check on %s, %s."%(last["date"],"a retrained brain was promoted" if last.get("promoted") else "the current brain was kept because challengers did not qualify"))
-        else: parts.append("Self-improvement: the brain was first trained on data through %s; it retrains on new data about every 21 trading days and only replaces itself if it holds up on days it has not seen."%b["trained_through"])
-    if v["job"].get("running"): parts.append("(A background retraining job is running now.)")
-    if v.get("hourly_note"): parts.append(v["hourly_note"])
+        parts.append("Neural risk-model holdout AUC: %.2f on %s–%s. This measures risk ranking, not BUY/SELL direction accuracy."%(ho["auc"],(v.get("brain") or {}).get("holdout_start"),(v.get("brain") or {}).get("holdout_end")))
+    lr=(v.get("live_record") or {}).get("graded") or {}
+    if lr.get("n",0):
+        parts.append("Live risk-classification record: %d graded calls; %.1f%% correct. This grades the neural drawdown warning only, not the final directional decision."%(lr["n"],100*lr.get("hit_rate",0)))
+    else:
+        calls=(v.get("live_record") or {}).get("calls_logged",0)
+        parts.append("Live risk-classification record: %d calls logged; not enough matured outcomes to report a graded rate."%calls)
     if v.get("data_note"): parts.append(v["data_note"])
+<<<<<<< HEAD
     parts.append("This is a research tool, not financial advice.")
     line="SUMMARY | Time frame: %s | Decision: %s | Confidence: %s | Drawdown risk %s vs alarm %s | Risk status: %s | Trend: %s | Risk-ranking AUC %s | Data as of %s"%(v["horizon_label"],v["verdict"],v["confidence"],p0(v["risk_score"]),p0(v["alarm_level"]),v.get("risk_classification","UNKNOWN"),v["trend_verdict"],("%.2f"%ho["auc"]) if ho.get("auc") is not None else "n/a",v["as_of"])
     return " ".join(parts)+"\n\n"+line
+=======
+    if v.get("hourly_note"): parts.append(v["hourly_note"])
+    parts.append("Research output only; not a personalized investment recommendation.")
+    return " ".join(parts)+"\n\nSUMMARY | Decision: %s | Status: %s | Trend: %s | Risk: %s (%s vs %s) | Data: %s"%(verdict,v.get("decision_status"),v.get("trend_verdict"),v.get("risk_state"),p0(v.get("risk_score")),p0(v.get("alarm_level")),v.get("model_data_as_of",v.get("as_of")))
+>>>>>>> 2d01d22 (Update MIRA market analysis)
 
 def answer_decision(prompt):
     visible_status("tool_call","MIRA chat: neural risk brain is scoring today's market and grading past calls.")
@@ -1562,7 +2286,7 @@ def answer_decision(prompt):
     answer=build_final_answer(v)
     visible_status("observation","FINAL %s (%s confidence) as of %s"%(v["verdict"],v["confidence"],v["as_of"]))
     visible_status("complete","Answer ready: FINAL "+v["verdict"],1)
-    return {"answer":answer,"summary":v,"actions":[{"tool":"neural_risk_brain","observation":{k:v.get(k) for k in ("verdict","confidence","horizon_label","as_of","risk_score","alarm_level","trend_verdict","interim")}}],"model":"MIRA neural risk brain (self-improving)"}
+    return {"answer":answer,"summary":v,"actions":[{"tool":"neural_risk_brain","observation":{k:v.get(k) for k in ("verdict","confidence","horizon_label","as_of","risk_score","alarm_level","risk_state","trend_verdict","decision_status","decision_reason","model_data_as_of","data_fresh","interim")}}],"model":"MIRA neural risk brain (self-improving)"}
 
 # ---- Chat answers for every other question: built from MIRA's own saved results, so no Ollama is needed (works on a cloud server) ----
 OLLAMA_PROBE={"at":0.0,"ok":False}
@@ -1583,7 +2307,7 @@ def general_answer(prompt):
     elif has("accura","correct","how good","right","perform","track record","reliab","trust","score","win rate","success"):
         tools.append("scoreboard")
         if sb.get("available"):
-            parts.append("On %s days the model had never seen, its BUY/SELL calls were right %s of the time. Simply saying BUY every day would have been right %s, so it does not beat that yet. Its risk ranking scores %.2f (0.50 is a coin flip). It warned before %s of the real 8%%+ drops, and %s of its alarms were followed by a drop (a drop happens %s of the time anyway)."%(sb["days"],pc(sb["call_accuracy"]),pc(sb["always_buy_accuracy"]),sb["auc"] or 0,pc(sb["drops_caught"]),pc(sb["alarm_precision"]),pc(sb["drop_base_rate"])))
+            parts.append("On %s days the model had never seen, its downside-risk classifications (SELL=alarm, BUY=no alarm) were right %s of the time. Always predicting no alarm would have been right %s. Its risk ranking scores %.2f (0.50 is a coin flip). It warned before %s of the real 8%%+ drops, and %s of its alarms were followed by a drop (a drop happens %s of the time anyway)."%(sb["days"],pc(sb["call_accuracy"]),pc(sb["always_buy_accuracy"]),sb["auc"] or 0,pc(sb["drops_caught"]),pc(sb["alarm_precision"]),pc(sb["drop_base_rate"])))
             if sb.get("strategy") and sb.get("buy_and_hold"): parts.append("Following its calls returned %s a year with a worst fall of %s; buy-and-hold returned %s a year with a worst fall of %s."%(pc(sb["strategy"]["cagr"]),pc(sb["strategy"]["max_drawdown"]),pc(sb["buy_and_hold"]["cagr"]),pc(sb["buy_and_hold"]["max_drawdown"])))
         else: parts.append("The networks are still doing their first training, so there are no test results yet.")
         lr=chart_live_record()
@@ -1619,7 +2343,7 @@ def general_answer(prompt):
         tools.append("intraday")
         parts.append((intraday_note(21) or "The hourly collector has not produced results yet.")+" Hourly price changes are saved and tested against the daily-only brain; they are used for predictions only if they improve the unseen-data score by a clear margin.")
     elif has("monte carlo","simulation","simulate","statistic","random sampl","bootstrap","equal probab"):
-        tools.append("monte_carlo"); dates,closes=load_price_series(); mc=monte_carlo_drop_risk(closes)
+        tools.append("monte_carlo"); dates,closes=_load_csv_series(); mc=monte_carlo_drop_risk(closes)
         if mc:
             drop_pct="%.0f"%(100*mc["drop_threshold"])
             parts.append("A pure statistics check, with no neural network involved: I took %d random real stretches of the market's history, each %d trading days long and each picked with equal probability (1 in %d), and counted how often a drop of %s%% or more happened inside one. Answer: %.1f%% of the time, with a 95%% confidence range of %.1f%% to %.1f%%."%(mc["simulations"],mc["horizon_days"],mc["windows_available"],drop_pct,100*mc["probability"],100*mc["confidence_95_low"],100*mc["confidence_95_high"]))
@@ -1639,15 +2363,20 @@ def general_answer(prompt):
         else: parts.append("Targets and paper-trading results are private to the owner and are not shown publicly. A target never changes the model's call.")
     elif has("risk","drawdown","crash","drop","fall","correction","danger","safe"):
         tools.append("neural_risk_brain"); v=final_verdict("next month")
+<<<<<<< HEAD
         if v.get("interim"): parts.append("The brain is still training; the trend rule says %s for now."%v["trend_verdict"])
         else: parts.append("The downside-risk model estimates a %s chance of a drop of 8%% or more within about a month, against an alarm threshold of %s. %s. The trend signal is %s. Drops of that size happened %s of the time historically."%(pc(v["risk_score"]),pc(v["alarm_level"]),"The risk alarm is active and MIRA blocks a directional call" if v.get("risk_alert") else "The risk alarm is not active",v["trend_verdict"],pc(sb.get("drop_base_rate"))))
+=======
+        if v.get("interim") or v.get("risk_state")=="UNKNOWN": parts.append("MIRA returns HOLD because a required input is unavailable. "+v.get("decision_reason",""))
+        else: parts.append("The neural model estimates an 8%%+ drawdown risk of %s against an alarm threshold of %s. Risk state: %s. Trend signal: %s. Reconciled decision: %s (%s)."%(pc(v["risk_score"]),pc(v["alarm_level"]),v["risk_state"],v["trend_verdict"],v["verdict"],v["decision_status"]))
+>>>>>>> 2d01d22 (Update MIRA market analysis)
     elif has("how","work","what are you","what is","explain","neural","network","model","why","who"):
         parts.append("I'm MIRA, a market research assistant. A small ensemble of neural networks estimates the chance of a drop of 8% or more over its trained horizon. It is a downside-risk model, not a price-direction model. A separate trend rule supplies a directional signal; if the risk alarm is active, MIRA returns HOLD rather than turning a risk warning into a SELL prediction. Calls are logged and graded later, and the networks retrain on new data.")
         parts.append("I can't predict tomorrow's move reliably - nobody can - and I'm not financial advice.")
     else:
         try:
-            v=final_verdict("next month")
-            if not v.get("interim"): parts.append("Here is the model's current call: %s for the next month (%s confidence), drop risk %s against an alarm level of %s."%(v["verdict"],v["confidence"],pc(v["risk_score"]),pc(v["alarm_level"])))
+            v=final_verdict("tomorrow")
+            if not v.get("interim"): parts.append("MIRA's current decision is %s (%s): trend %s; downside-risk state %s, score %s vs alarm %s."%(v["verdict"],v.get("decision_status"),v.get("trend_verdict"),v.get("risk_state"),pc(v.get("risk_score")),pc(v.get("alarm_level"))))
         except Exception: pass
         parts.append("You can ask me things like: \"should I buy or sell today / this week / next year?\", \"how accurate are you?\", \"how do you learn?\", \"how fresh is your data?\", \"what is the drop risk?\" or \"how do you work?\".")
     parts.append("Research only, not financial advice.")
@@ -1663,13 +2392,17 @@ def mira_facts(private=False):
     if brain and brain.get("eval"):
         sb=chart_scoreboard(brain)
         if sb.get("available"):
+<<<<<<< HEAD
             lines.append("Unseen-data risk test (%s days): risk-alert classification accuracy %.1f%%; always-no-alert baseline %.1f%%; risk-ranking AUC %.2f; caught %.0f%% of real 8%%+ drops; %.0f%% of alarms followed by a drop (base rate %.0f%%)."%(sb["days"],100*sb["risk_classification_accuracy"],100*sb["no_alert_baseline_accuracy"],sb["auc"] or 0,100*(sb["drops_caught"] or 0),100*sb["alarm_precision"],100*sb["drop_base_rate"]))
+=======
+            lines.append("Unseen-data test (%s days): downside-risk classifications right %.1f%%; always predicting no alarm would be right %.1f%%; risk-ranking AUC %.2f; caught %.0f%% of real 8%%+ drops; %.0f%% of alarms followed by a drop (base rate %.0f%%)."%(sb["days"],100*sb["call_accuracy"],100*sb["always_buy_accuracy"],sb["auc"] or 0,100*(sb["drops_caught"] or 0),100*sb["alarm_precision"],100*sb["drop_base_rate"]))
+>>>>>>> 2d01d22 (Update MIRA market analysis)
             if sb.get("strategy"): lines.append("Following its calls: %.1f%%/yr, worst fall %.0f%%; buy-and-hold: %.1f%%/yr, worst fall %.0f%%."%(100*sb["strategy"]["cagr"],100*sb["strategy"]["max_drawdown"],100*sb["buy_and_hold"]["cagr"],100*sb["buy_and_hold"]["max_drawdown"]))
         lines.append("Brain trained through %s."%brain.get("trained_through"))
         lines.append("Inputs used: %s."%("13 price-based features only" if brain.get("features",BRAIN_FEATURES)==BRAIN_FEATURES else "13 price-based features plus 3 macro features (10-year Treasury yield change, high-yield credit spread, recession flag)"))
     try:
         v=final_verdict("next month")
-        if not v.get("interim"): lines.append("Current call (next month): %s, confidence %s, drop risk %.1f%% vs alarm %.1f%%, trend rule %s, data as of %s."%(v["verdict"],v["confidence"],100*v["risk_score"],100*v["alarm_level"],v["trend_verdict"],v["as_of"]))
+        if not v.get("interim"): lines.append("Current decision (next month): %s (%s), trend %s, downside risk %s (%.1f%% vs %.1f%% alarm), official data through %s."%(v["verdict"],v.get("decision_status"),v.get("trend_verdict"),v.get("risk_state"),100*v["risk_score"],100*v["alarm_level"],v.get("model_data_as_of",v["as_of"])))
     except Exception: pass
     try:
         mc=(v or {}).get("monte_carlo")
@@ -1804,13 +2537,18 @@ def chart_replay(dates,closes,brain,days):
     probs=brain_predict_ids(brain_ensemble(ce["members"]),ce["mean"],ce["scale"],feats,ids); out=[]
     for i in ids:
         v="SELL" if probs[i]>=thr else "BUY"; y=ys[i]
+<<<<<<< HEAD
         out.append({"d":dates[i],"v":v,"risk_alert":bool(probs[i]>=thr),"label":"RISK_ALERT" if probs[i]>=thr else "NO_ALERT","p":round(probs[i],4),"o":None if y is None else int((v=="SELL")==bool(y))})
+=======
+        out.append({"d":dates[i],"v":v,"risk_state":"ELEVATED" if v=="SELL" else "NORMAL","kind":"downside_risk_classification","p":round(probs[i],4),"o":None if y is None else int((v=="SELL")==bool(y))})
+>>>>>>> 2d01d22 (Update MIRA market analysis)
     return out
 
 def chart_scoreboard(brain):
     ho=brain.get("holdout") or {}; br=ho.get("base_rate"); fs=ho.get("flagged_share"); fd=ho.get("flagged_drop_rate"); cd=ho.get("calm_drop_rate")
     if None in (br,fs,fd,cd): return {"available":False}
     tp=fs*fd; tn=(1-fs)*(1-cd)
+<<<<<<< HEAD
     return {"available":True,"days":ho.get("rows"),"auc":ho.get("auc"),"auc_ci":ho.get("auc_ci"),
             "risk_classification_accuracy":tp+tn,"no_alert_baseline_accuracy":1-br,
             # Legacy aliases retained for any older client still reading these keys.
@@ -1818,12 +2556,32 @@ def chart_scoreboard(brain):
             "drops_caught":(tp/br) if br else None,"alarm_precision":fd,"drop_base_rate":br,
             "strategy":ho.get("strategy"),"buy_and_hold":ho.get("buy_and_hold"),
             "alarm_level":brain.get("threshold"),"trained_through":brain.get("trained_through")}
+=======
+    return {"available":True,"days":ho.get("rows"),"auc":ho.get("auc"),"auc_ci":ho.get("auc_ci"),"call_accuracy":tp+tn,"risk_classification_accuracy":tp+tn,"always_buy_accuracy":1-br,"drops_caught":(tp/br) if br else None,"risk_warning_recall":(tp/br) if br else None,"alarm_precision":fd,"risk_warning_precision":fd,"drop_base_rate":br,"metric_semantics":"All BUY/SELL labels in this scoreboard refer to the neural downside-risk classifier (SELL=alarm, BUY=no alarm), not a price-direction forecast.","prediction_task":"21-trading-day drawdown-risk classification","directional_accuracy_available":False,"strategy":ho.get("strategy"),"buy_and_hold":ho.get("buy_and_hold"),"alarm_level":brain.get("threshold"),"trained_through":brain.get("trained_through")}
+>>>>>>> 2d01d22 (Update MIRA market analysis)
 
 def chart_live_record():
+    """Separate live scorecards for the neural drawdown classifier and directional fusion."""
     try: led=json.loads((LEARN_DIR/"ledger.json").read_text(encoding="utf-8"))
     except (OSError,json.JSONDecodeError): led=[]
-    m=[e for e in led if "dropped_8pct_21d" in e]; d=[e for e in led if "next_day_up" in e]
-    return {"calls":len(led),"month_graded":len(m),"month_right":sum(int((e["verdict"]=="SELL")==e["dropped_8pct_21d"]) for e in m),"month_always_buy_right":sum(int(not e["dropped_8pct_21d"]) for e in m),"day_graded":len(d),"day_right":sum(int((e["verdict"]=="BUY")==e["next_day_up"]) for e in d),"day_always_buy_right":sum(int(e["next_day_up"]) for e in d)}
+    m=[e for e in led if "dropped_8pct_21d" in e]
+    try: dledger=json.loads(directional_ledger_path().read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError): dledger=[]
+    dm=[e for e in dledger if "actual_up" in e]
+    recent=dm[-126:]
+    signals=[e for e in recent if e.get("signal") in ("BUY","SELL")]
+    directional={"matured":len(dm),
+                 "recent_brier":(sum(e["brier"] for e in recent)/len(recent)) if recent else None,
+                 "recent_logloss":(sum(e["logloss"] for e in recent)/len(recent)) if recent else None,
+                 "signal_accuracy":(sum(int(e.get("direction_correct",False)) for e in signals)/len(signals)) if signals else None,
+                 "graded_signals":len(signals)}
+    return {"calls":len(led),"month_graded":len(m),
+            "month_right":sum(int((e["verdict"]=="SELL")==e["dropped_8pct_21d"]) for e in m),
+            "month_always_buy_right":sum(int(not e["dropped_8pct_21d"]) for e in m),
+            "directional":directional,
+            "month_metric_semantics":"Neural downside-risk classification only: SELL=drawdown alarm, BUY=no alarm. Not directional BUY/SELL accuracy.",
+            "day_metric_semantics":"Directional forecasts are graded against the next completed close; the risk model is not a next-day direction model."}
+
 
 def refresh_prices_background():
     """Same job as refresh_prices(), but for callers that must respond fast (a live page waiting on this request) and can't afford to block on a slow/unreachable FRED server (up to ~75s of retries). Kicks the real refresh off on its own thread if one isn't already running, and returns immediately either way - the page just shows whatever data is already on disk from the last successful refresh, instead of hanging."""
@@ -1837,6 +2595,7 @@ def chart_payload(days=180):
     if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
         refresh_prices_background()   # never block this request on a live network fetch - see function docstring
         dates,closes=load_price_series(); brain=brain_load(); candles=chart_daily_candles(); win=dates[-days:]
+<<<<<<< HEAD
         data={"schema_version":2,"as_of":dates[-1],"days":days,"dates":win,"closes":[round(c,2) for c in closes[-days:]],"candles":[{"d":d,"o":candles[d][0],"h":candles[d][1],"l":candles[d][2],"c":candles[d][3]} for d in win if d in candles],"data_note":price_data_note(),"live_record":chart_live_record()}
         if brain is not None and brain.get("eval"):
             data["replay"]=chart_replay(dates,closes,brain,days); data["scoreboard"]=chart_scoreboard(brain)
@@ -1844,6 +2603,16 @@ def chart_payload(days=180):
         try:
             v=final_verdict("next month")
             data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","brain_verdict","risk_classification","risk_alert","risk_clear","direction_source","agree","decision_status","decision_reason","risk_horizon_days","brain_job","as_of","monte_carlo")}
+=======
+        data={"as_of":dates[-1],"days":days,"dates":win,"closes":[round(c,2) for c in closes[-days:]],"candles":[{"d":d,"o":candles[d][0],"h":candles[d][1],"l":candles[d][2],"c":candles[d][3]} for d in win if d in candles],"data_note":price_data_note(),"live_record":chart_live_record()}
+        if brain is not None and brain.get("eval") and brain.get("data_basis")=="official_daily_closes_v1":
+            model_dates,model_closes=_load_csv_series()
+            data["replay"]=chart_replay(model_dates,model_closes,brain,days); data["scoreboard"]=chart_scoreboard(brain)
+        else: data["replay"]=[]; data["scoreboard"]={"available":False}
+        try:
+            v=final_verdict("next month")
+            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","risk_state","trend_verdict","brain_verdict","agree","risk_trend_alignment","decision_status","decision_reason","risk_horizon_days","model_data_as_of","model_data_source","data_age_calendar_days","data_fresh","risk_model_fresh","fusion","brain_job","as_of","monte_carlo")}
+>>>>>>> 2d01d22 (Update MIRA market analysis)
         except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
         CHART_CACHE.update({"at":now,"days":days,"data":data})
     out=dict(CHART_CACHE["data"])
@@ -2001,7 +2770,8 @@ class Handler(SimpleHTTPRequestHandler):
                     if not MARKET_API_KEY or not MARKET_API_SECRET: raise ValueError("Enter both Alpaca credentials first, or use Forget saved keys to remove stored credentials.")
                     snapshot=fetch_market_snapshot(force=True)
                     if not snapshot.get("connected"): raise ValueError(snapshot.get("error","Could not reconnect using the saved credentials."))
-                    result={"connected":True,"message":"Reconnected using credentials saved in the local encrypted store.","snapshot":snapshot}
+                    start_market_stream()
+                    result={"connected":True,"message":"Reconnected using credentials saved in the local encrypted store.","snapshot":snapshot,"stream_status":MARKET_STREAM.get("status")}
                 elif not key or not secret or len(key)>256 or len(secret)>256:
                     raise ValueError("Enter both Alpaca key ID and secret.")
                 else:
@@ -2017,7 +2787,8 @@ class Handler(SimpleHTTPRequestHandler):
                         save_market_credentials(key,secret)
                         stored=True
                     except (OSError,sqlite3.Error,ValueError): stored=False
-                    result={"connected":True,"message":("Connected. Credentials are saved encrypted on this Windows account." if stored else "Connected for this session, but secure local storage was unavailable; keys will be lost when the server stops."),"snapshot":snapshot}
+                    start_market_stream()
+                    result={"connected":True,"message":("Connected. Credentials are saved encrypted on this Windows account." if stored else "Connected for this session, but secure local storage was unavailable; keys will be lost when the server stops."),"snapshot":snapshot,"stream_status":MARKET_STREAM.get("status")}
             elif path=="/api/train": result=train(payload)
             elif path=="/api/scan": result=scan()
             elif path=="/api/agent": result=run_agent(payload)
@@ -2053,6 +2824,8 @@ if __name__=="__main__":
     try:
         if brain_load() is None: print("No trained neural risk brain yet: training it in the background now (a few minutes)."); start_brain_job(False)
     except Exception as exc: print("Could not start brain training:",exc)
+    start_market_stream()
+    print("Alpaca stream status:",MARKET_STREAM.get("status"))
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
     threading.Thread(target=paper_watch_loop,daemon=True).start(); print("Paper take-profit/stop-loss watcher started: checks every 5 seconds while the market is open.")
     def keepalive_loop():
