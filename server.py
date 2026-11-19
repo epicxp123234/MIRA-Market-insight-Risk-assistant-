@@ -905,6 +905,7 @@ def paper_sync_to_verdict(v=None):
     if not st.get("enabled"): return {"skipped":"paper trading is off"}
     v=v or final_verdict("tomorrow")
     if v.get("interim"): return {"skipped":"brain still training"}
+    if v.get("verdict")=="HOLD": return {"skipped":"MIRA returned HOLD; no paper order placed"}
     want_long = v["verdict"]=="BUY"
     acct=paper_account()
     if acct is None: return {"error":"could not read the paper account"}
@@ -1431,6 +1432,26 @@ def monte_carlo_drop_risk(closes,horizon=None,drop=None,n_sims=3000,seed=12345):
     p=hits/n_sims; se=math.sqrt(p*(1-p)/n_sims)
     return {"probability":p,"simulations":n_sims,"horizon_days":horizon,"drop_threshold":drop,"confidence_95_low":max(0.0,p-1.96*se),"confidence_95_high":min(1.0,p+1.96*se),"windows_available":len(starts),"method":"historical bootstrap: %d random real past %d-day windows, each drawn with equal probability (1/%d); no learning, no neural network involved"%(n_sims,horizon,len(starts))}
 
+def reconcile_signals(brain_verdict, trend_verdict, horizon_days):
+    """Conservative decision layer: disagreement is HOLD, never a forced BUY/SELL.
+
+    The neural model estimates a fixed-horizon drawdown risk; the trend rule is
+    an independent directional filter. Neither is treated as a calibrated
+    probability of price direction. Long horizons beyond 63 trading days are
+    not timed by this system and therefore return HOLD.
+    """
+    if brain_verdict not in ("BUY", "SELL") or trend_verdict not in ("BUY", "SELL"):
+        return {"verdict":"HOLD", "agree":False, "status":"INSUFFICIENT_SIGNAL",
+                "reason":"One or more signal engines did not produce a valid directional signal."}
+    if brain_verdict != trend_verdict:
+        return {"verdict":"HOLD", "agree":False, "status":"CONFLICT",
+                "reason":"The neural risk model and trend engine disagree. No directional call is issued."}
+    if horizon_days > 63:
+        return {"verdict":"HOLD", "agree":True, "status":"HORIZON_UNSUPPORTED",
+                "reason":"The requested horizon exceeds 63 trading days; this system has not established a reliable timing signal at that horizon."}
+    return {"verdict":brain_verdict, "agree":True, "status":"AGREEMENT",
+            "reason":"The neural risk model and trend engine agree."}
+
 def final_verdict(prompt=""):
     h,label,defaulted=parse_horizon(prompt)
     try: refresh_prices(False)
@@ -1442,20 +1463,22 @@ def final_verdict(prompt=""):
     pos=trend_positions(closes,n,band); trend_verdict="BUY" if pos[-1]==1 else "SELL"
     dist=closes[-1]/(sum(closes[-n:])/n)-1; d50=closes[-1]/(sum(closes[-50:])/50)-1
     start=eval_start(dates); everyday=horizon_stats(closes,[1.0]*len(closes),start,h,None)
-    out={"as_of":dates[-1],"data_note":price_data_note(),"hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,"horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,"trend_rule":{"average_days":n,"band_pct":band*100},"distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),"self_check":learn_note,"brain":None,"monte_carlo":monte_carlo_drop_risk(closes,h if h>=5 else BRAIN_HORIZON,BRAIN_DROP)}
+    out={"as_of":dates[-1],"data_note":price_data_note(),"hourly_note":intraday_note(h),"horizon_days":h,"horizon_label":label,"horizon_defaulted":defaulted,"horizon_all":everyday,"trend_verdict":trend_verdict,"trend_rule":{"average_days":n,"band_pct":band*100},"distance_from_average_pct":round(dist*100,2),"distance_from_50day_pct":round(d50*100,2),"self_check":learn_note,"brain":None,"monte_carlo":monte_carlo_drop_risk(closes,h if h>=5 else BRAIN_HORIZON,BRAIN_DROP),"risk_horizon_days":BRAIN_HORIZON,"risk_horizon_note":"The neural risk score uses its trained fixed horizon; it is not automatically changed when the requested outlook horizon changes."}
     if brain is None:
         started=start_brain_job(False)
-        out.update({"verdict":trend_verdict,"confidence":"Low","interim":True,"brain_job":started["message"]}); return out
+        out.update({"verdict":"HOLD","confidence":"Low","interim":True,"decision_status":"BRAIN_UNAVAILABLE","decision_reason":"The neural risk model is not trained yet. The trend rule is shown as provisional context only; no final BUY/SELL call is issued.","provisional_trend_verdict":trend_verdict,"brain_job":started["message"],"agree":False})
+        return out
     p=brain_risk_now(brain,dates,closes); thr=brain["threshold"]; brain_verdict="SELL" if p>=thr else "BUY"
     margin=((p-thr)/thr) if brain_verdict=="SELL" else ((thr-p)/thr)
     level=2 if margin>=0.5 else (1 if margin>=0.2 else 0)
-    agree=(brain_verdict==trend_verdict)
-    if not agree: level=max(0,level-1)
+    decision=reconcile_signals(brain_verdict,trend_verdict,h)
+    if not decision["agree"]: level=0
     cap=0 if h<=5 else (1 if h<=21 else (2 if h<=63 else 0))
-    verdict=brain_verdict
-    if h>63: verdict="BUY"       # beyond ~3 months no timing signal has worked well; the brain's warning is shown instead
-    live=update_ledger(dates,closes,brain_verdict,("Low","Medium","High")[level],p,thr)
-    out.update({"verdict":verdict,"brain_verdict":brain_verdict,"confidence":("Low","Medium","High")[min(level,cap)],"interim":False,"agree":agree,"risk_score":p,"alarm_level":thr,"brain":{"trained_through":brain["trained_through"],"hidden":brain["hidden"],"holdout":brain["holdout"],"holdout_start":brain["eval"]["holdout_start"],"holdout_end":brain["eval"]["holdout_end"],"history":brain.get("history",[])[-3:]},"live_record":live,"job":dict(BRAIN_JOB)})
+    confidence=("Low","Medium","High")[min(level,cap)]
+    # Keep the risk-model ledger separate from the reconciled directional call:
+    # it grades the neural model's drawdown warning, not the BUY/SELL strategy.
+    live=update_ledger(dates,closes,brain_verdict,confidence,p,thr)
+    out.update({"verdict":decision["verdict"],"brain_verdict":brain_verdict,"confidence":confidence,"interim":False,"agree":decision["agree"],"decision_status":decision["status"],"decision_reason":decision["reason"],"risk_score":p,"alarm_level":thr,"brain":{"trained_through":brain["trained_through"],"hidden":brain["hidden"],"holdout":brain["holdout"],"holdout_start":brain["eval"]["holdout_start"],"holdout_end":brain["eval"]["holdout_end"],"history":brain.get("history",[])[-3:]},"live_record":live,"job":dict(BRAIN_JOB)})
     return out
 
 def build_final_answer(v):
@@ -1463,14 +1486,21 @@ def build_final_answer(v):
     h=v["horizon_days"]; a=v["horizon_all"]; n=v["trend_rule"]["average_days"]
     parts=["Time frame: %s.%s"%(v["horizon_label"]," You did not name one, so I used about a month; ask about tomorrow or next year for a different view." if v["horizon_defaulted"] else "")]
     if v["interim"]:
-        parts.append("My neural risk brain is not trained yet. I have started training it now (%s). Check the live network panel; it takes a few minutes. Ask again when it finishes."%v["brain_job"])
-        parts.append("Until then, the simple trend rule gives an interim view: %s (the index is %.1f%% %s its %d-day average). This is NOT the neural network's call."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n))
-        return " ".join(parts)+"\n\nSUMMARY | INTERIM (brain training) | Trend rule: %s | Data as of %s"%(v["trend_verdict"],v["as_of"])
-    parts.append("Model call: BUY (the networks see a normal-risk regime)." if v["verdict"]=="BUY" else "Model call: SELL (the networks see an elevated-risk regime).")
+        parts.append("Decision: HOLD / NO FINAL DIRECTIONAL CALL. The neural risk model is not trained yet (%s)."%v["brain_job"])
+        parts.append("The trend rule currently says %s (the index is %.1f%% %s its %d-day average). This is provisional context only, not a BUY/SELL recommendation."%(v["provisional_trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n))
+        return " ".join(parts)+"\n\nSUMMARY | HOLD | Brain unavailable | Provisional trend: %s | Data as of %s"%(v["provisional_trend_verdict"],v["as_of"])
+    if v["verdict"]=="BUY":
+        parts.append("Model call: BUY. The neural risk model and trend engine agree.")
+    elif v["verdict"]=="SELL":
+        parts.append("Model call: SELL. The neural risk model and trend engine agree on elevated downside risk / defensive trend.")
+    else:
+        parts.append("Model call: HOLD / NO DIRECTIONAL CALL. "+v.get("decision_reason","The decision layer withheld a directional call."))
     parts.append("Confidence: %s."%v["confidence"])
     state="above" if v["risk_score"]>=v["alarm_level"] else "below"
-    parts.append("Why: my neural networks put the chance of a drop of 8%% or more within about a month at %s. My alarm level is %s, and the score is %s it, so the networks say %s."%(p0(v["risk_score"]),p0(v["alarm_level"]),state,v["brain_verdict"]))
-    parts.append("Second opinion: the simple trend rule says %s (the index is %.1f%% %s its %d-day average and %.1f%% %s its 50-day average), so the two %s."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n,abs(v["distance_from_50day_pct"]),"above" if v["distance_from_50day_pct"]>=0 else "below","agree" if v["agree"] else "disagree, so I lowered my confidence"))
+    parts.append("Neural risk model: estimated probability of a drop of 8%% or more over its trained %d-trading-day horizon is %s; its alarm threshold is %s, and the score is %s the threshold. Its independent risk classification is %s."%(v.get("risk_horizon_days",BRAIN_HORIZON),p0(v["risk_score"]),p0(v["alarm_level"]),state,v["brain_verdict"]))
+    parts.append("Trend engine: %s (the index is %.1f%% %s its %d-day average and %.1f%% %s its 50-day average)."%(v["trend_verdict"],abs(v["distance_from_average_pct"]),"above" if v["distance_from_average_pct"]>=0 else "below",n,abs(v["distance_from_50day_pct"]),"above" if v["distance_from_50day_pct"]>=0 else "below"))
+    if not v["agree"]: parts.append("Reconciliation: CONFLICT. The engines disagree, so MIRA returns HOLD and sets confidence to Low instead of letting either engine override the other.")
+    elif v.get("decision_status")=="HORIZON_UNSUPPORTED": parts.append("Reconciliation: the engines agree, but the requested horizon is beyond 63 trading days. MIRA returns HOLD because its timing signal is not validated that far ahead.")
     mc=v.get("monte_carlo")
     if mc: parts.append("Base-rate check (history, not a prediction): across %d random real %d-day stretches, a drop like this happened %s of the time (95%% confidence range %s to %s)."%(mc["simulations"],mc["horizon_days"],p0(mc["probability"]),p0(mc["confidence_95_low"]),p0(mc["confidence_95_high"])))
     b=v["brain"]; ho=b["holdout"]; s=ho["strategy"]; bh=ho["buy_and_hold"]
@@ -1485,12 +1515,10 @@ def build_final_answer(v):
         parts.append("For this time frame, the index has historically been higher %s of the time and typically moved %s, but in the worst 5%% of cases it fell %s or more."%(p0(a["p_up"]),sg(a["median"]),("%.1f%%" if abs(a["p5"])<0.1 else "%.0f%%")%(abs(a["p5"])*100)))
     if h<=1: parts.append("Tomorrow is close to a coin flip for any method, so a day trader should not lean on this call; the brain looks about a month ahead.")
     elif h<=5: parts.append("A week ahead is still mostly noise, so treat this as a mild lean only.")
-    elif h>63:
-        parts.append("Over a year or longer the market has gone up most of the time, even after warnings, so no timing signal has worked well at this range; staying invested has historically beaten trying to time exits.")
-        if v["brain_verdict"]=="SELL": parts.append("Note: the brain's risk alarm is currently on, so consider adding gradually instead of all at once.")
+    elif h>63: parts.append("No timing signal has been established for this horizon; MIRA therefore reports HOLD rather than extrapolating a short-horizon model.")
     r=v["live_record"]["graded"]
-    if r["n"]>=1: parts.append("Live record: %d call%s graded, the risk call was right %s of the time (always saying BUY would be right %s)."%(r["n"],"" if r["n"]==1 else "s",pct(r["hit_rate"]),pct(r["always_buy_rate"])))
-    else: parts.append("Live record: %d call%s logged; each is graded after 1 day and after a month against what the market really did."%(v["live_record"]["calls_logged"],"" if v["live_record"]["calls_logged"]==1 else "s"))
+    if r["n"]>=1: parts.append("Live neural risk record: %d call%s graded, the risk call was right %s of the time (always saying BUY would be right %s). This grades the neural drawdown warning, not the reconciled HOLD/BUY/SELL decision."%(r["n"],"" if r["n"]==1 else "s",pct(r["hit_rate"]),pct(r["always_buy_rate"])))
+    else: parts.append("Live neural risk record: %d call%s logged; each is graded after 1 day and after a month against what the market really did."%(v["live_record"]["calls_logged"],"" if v["live_record"]["calls_logged"]==1 else "s"))
     hist=b.get("history") or []
     if hist:
         last=hist[-1]
@@ -1500,7 +1528,7 @@ def build_final_answer(v):
     if v.get("hourly_note"): parts.append(v["hourly_note"])
     if v.get("data_note"): parts.append(v["data_note"])
     parts.append("This is a research tool, not financial advice.")
-    line="SUMMARY | Time frame: %s | Model call: %s | Confidence: %s | Risk score %s vs alarm %s | Trend rule: %s | Brain test score %s | Data as of %s"%(v["horizon_label"],v["verdict"],v["confidence"],p0(v["risk_score"]),p0(v["alarm_level"]),v["trend_verdict"],("%.2f"%ho["auc"]) if ho.get("auc") is not None else "n/a",v["as_of"])
+    line="SUMMARY | Time frame: %s | Decision: %s | Confidence: %s | Risk score %s vs alarm %s | Neural risk: %s | Trend: %s | Brain test score %s | Data as of %s"%(v["horizon_label"],v["verdict"],v["confidence"],p0(v["risk_score"]),p0(v["alarm_level"]),v["brain_verdict"],v["trend_verdict"],("%.2f"%ho["auc"]) if ho.get("auc") is not None else "n/a",v["as_of"])
     return " ".join(parts)+"\n\n"+line
 
 def answer_decision(prompt):
@@ -1785,7 +1813,7 @@ def chart_payload(days=180):
         else: data["replay"]=[]; data["scoreboard"]={"available":False}
         try:
             v=final_verdict("next month")
-            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","agree","brain_job","as_of","monte_carlo")}
+            data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","trend_verdict","brain_verdict","agree","decision_status","decision_reason","risk_horizon_days","brain_job","as_of","monte_carlo")}
         except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
         CHART_CACHE.update({"at":now,"days":days,"data":data})
     out=dict(CHART_CACHE["data"])
