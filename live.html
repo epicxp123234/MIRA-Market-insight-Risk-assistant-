@@ -23,7 +23,7 @@ main{max-width:1180px;margin:0 auto;padding:16px 20px 40px}
 .arrow{font-size:54px;line-height:1}
 .big{font-size:34px;font-weight:700;letter-spacing:.02em}
 .sub{color:var(--muted);font-size:13px}
-.buy{color:var(--up)}.sell{color:var(--down)}
+.buy{color:var(--up)}.sell{color:var(--down)}.hold{color:var(--warn)}
 .gauge{margin-top:14px}
 .bar{position:relative;height:10px;border-radius:6px;background:#0c1422;border:1px solid var(--line);overflow:visible}
 .fill{height:100%;border-radius:6px}
@@ -78,7 +78,7 @@ canvas{display:block;width:100%}
     <div class="msg" id="chartMsg"></div>
   </section>
 
-  <p class="note"><b>How to read this.</b> Under the price, the top strip is the model's call each day (teal = BUY, red = SELL). The strip below it shows whether that call turned out right a month later: <b>green = right, red = wrong, grey = too recent to tell</b>. Every call to the left of today was made by a network trained <b>before</b> those days, so you are seeing real out-of-sample results, not a replay of what it had already learned. "Right" means: SELL before a drop of 8% or more within about a month, or BUY when no such drop followed. This is research output, not financial advice.</p>
+  <p class="note"><b>How to read this.</b> The neural model estimates downside risk (the chance of an 8%+ drawdown over its fixed horizon); it does not predict price direction. The trend rule supplies the directional signal. If the risk alarm is active, the unified decision is HOLD. In the chart, the first strip shows historical risk alerts (red = alert, teal = no alert); the second strip shows whether that risk classification was right (green = right, red = wrong, grey = too recent). These are historical out-of-sample risk evaluations, not guaranteed forecasts. Research output, not financial advice.</p>
 </main>
 
 <script>
@@ -119,37 +119,53 @@ function absorbLive(){
 
 function renderCards(){
   const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{};
-  let h='<h2>Model\'s view right now</h2>';
-  if(v.error){h+='<div class="sub">'+v.error+'</div>'}
-  else if(v.interim){h+='<div class="sub">The neural networks are still training for the first time ('+(v.brain_job||'')+'). The trend rule says <b>'+v.trend_verdict+'</b> in the meantime. Reload in a few minutes.</div>'}
-  else{
-    const buy=v.verdict==='BUY', c=buy?'buy':'sell';
-    const risk=v.risk_score, alarm=v.alarm_level, max=Math.max(.4,alarm*1.6,risk*1.2);
-    h+='<div class="verdict"><div class="arrow '+c+'">'+(buy?'▲':'▼')+'</div><div><div class="big '+c+'">'+(buy?'BUY':'SELL')+'</div><div class="sub">Confidence: <b>'+v.confidence+'</b> · next month · data to '+v.as_of+'</div></div></div>';
-    h+='<div class="gauge"><div class="bar"><div class="fill" style="width:'+Math.min(100,risk/max*100)+'%;background:'+(risk>=alarm?DOWN:UP)+'"></div><div class="tick" style="left:'+Math.min(100,alarm/max*100)+'%"></div></div>'
-      +'<div class="glabel"><span>Chance of a drop of 8%+ in about a month: <b style="color:var(--text)">'+pct(risk,0)+'</b></span><span>Alarm level '+pct(alarm,0)+'</span></div></div>'
-      +'<div class="sub" style="margin-top:10px">Second opinion (trend rule): <b>'+v.trend_verdict+'</b> — '+(v.agree?'agrees with the networks.':'<span style="color:var(--warn)">disagrees with the networks.</span>')+'</div>';
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let h='<h2>Unified decision</h2>';
+  if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
+  else if(v.interim){
+    h+='<div class="verdict"><div class="big hold">HOLD</div><div class="sub">Risk model unavailable or training. No directional call is issued.</div></div>';
+    h+='<div class="sub" style="margin-top:10px">Trend context: <b>'+esc(v.trend_verdict||'—')+'</b> · '+esc(v.brain_job||'Waiting for model')+'</div>';
+  }else{
+    const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD';
+    const cls=verdict.toLowerCase(), icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
+    const risk=Number(v.risk_score), alarm=Number(v.alarm_level);
+    const validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0;
+    const max=validRisk?Math.max(.4,alarm*1.6,risk*1.2):.4;
+    const riskAlert=!!v.risk_alert || (validRisk&&risk>=alarm);
+    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next month')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
+    h+='<div class="gauge"><div class="bar"><div class="fill" style="width:'+(validRisk?Math.min(100,risk/max*100):0)+'%;background:'+(riskAlert?DOWN:UP)+'"></div><div class="tick" style="left:'+(validRisk?Math.min(100,alarm/max*100):0)+'%"></div></div>';
+    h+='<div class="glabel"><span>8%+ drawdown risk: <b style="color:var(--text)">'+(validRisk?pct(risk,0):'—')+'</b></span><span>Alarm '+(validRisk?pct(alarm,0):'—')+'</span></div></div>';
+    h+='<div class="stats" style="margin-top:14px">';
+    h+='<div class="stat"><b>'+esc(v.trend_verdict||'—')+'</b><span>Trend-rule direction (source of BUY/SELL)</span></div>';
+    h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(riskAlert?'ALERT ACTIVE':'BELOW ALARM')+'</b><span>Independent downside-risk classification</span></div>';
+    h+='</div>';
+    h+='<div class="sub" style="margin-top:12px"><b>Why this decision:</b> '+esc(v.decision_reason||'No explanation supplied.')+'</div>';
+    h+='<div class="sub" style="margin-top:6px">Decision status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Risk model is not a directional model.</div>';
   }
   $('verdictCard').innerHTML=h;
 
-  let s='<h2>How often is it right? (days it never saw)</h2>';
+  let s='<h2>How well does the risk model detect drawdowns? (held-out days)</h2>';
   if(sb.available){
-    const worse=sb.call_accuracy<sb.always_buy_accuracy;
+    const accuracy=sb.risk_classification_accuracy??sb.call_accuracy;
+    const baseline=sb.no_alert_baseline_accuracy??sb.always_buy_accuracy;
+    const worse=accuracy<baseline;
     s+='<div class="stats">'
-     +'<div class="stat '+(worse?'warn':'')+'"><b>'+pct(sb.call_accuracy)+'</b><span>Calls right (BUY/SELL). Always saying BUY: '+pct(sb.always_buy_accuracy)+'</span></div>'
-     +'<div class="stat"><b>'+(sb.auc!=null?sb.auc.toFixed(2):'—')+'</b><span>Risk-ranking score (0.50 = coin flip)</span></div>'
-     +'<div class="stat"><b>'+pct(sb.drops_caught,0)+'</b><span>Of real 8%+ drops, how many it warned about</span></div>'
-     +'<div class="stat"><b>'+pct(sb.alarm_precision,0)+'</b><span>Alarms that were followed by a drop (drops happen '+pct(sb.drop_base_rate,0)+' of the time anyway)</span></div>'
+     +'<div class="stat '+(worse?'warn':'')+'"><b>'+pct(accuracy)+'</b><span>Risk-alert classification accuracy. No-alert baseline: '+pct(baseline)+'</span></div>'
+     +'<div class="stat"><b>'+(sb.auc!=null?sb.auc.toFixed(2):'—')+'</b><span>Risk-ranking AUC (0.50 = chance)</span></div>'
+     +'<div class="stat"><b>'+pct(sb.drops_caught,0)+'</b><span>Of actual 8%+ drawdowns detected</span></div>'
+     +'<div class="stat"><b>'+pct(sb.alarm_precision,0)+'</b><span>Alerts followed by an 8%+ drawdown (base rate '+pct(sb.drop_base_rate,0)+')</span></div>'
      +'</div>';
-    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Following its calls: <b>'+pct(sb.strategy.cagr)+'</b>/yr, worst drop '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold: <b>'+pct(sb.buy_and_hold.cagr)+'</b>/yr, worst drop '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' unseen days).</div>';
-  }else s+='<div class="sub">The test results appear once the networks have trained.</div>';
-  const lm=lr.month_graded? lr.month_right+' of '+lr.month_graded+' right (always-BUY: '+lr.month_always_buy_right+')':'none graded yet';
-  s+='<div class="sub" style="margin-top:8px">Live record since this server started logging: '+(lr.calls||0)+' calls · month-ahead: '+lm+'.</div>';
+    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Historical strategy simulation: '+pct(sb.strategy.cagr)+'/yr, worst drawdown '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold '+pct(sb.buy_and_hold.cagr)+'/yr, worst drawdown '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' held-out days). These are historical simulations, not expected returns.</div>';
+  }else s+='<div class="sub">Held-out test results appear once the model has trained.</div>';
+  const lm=lr.month_graded? lr.month_right+' of '+lr.month_graded+' risk classifications correct (no-alert baseline: '+lr.month_always_buy_right+')':'none graded yet';
+  s+='<div class="sub" style="margin-top:8px">Live risk-model record: '+(lr.calls||0)+' logged calls · month-ahead: '+lm+'.';
+  if(v.risk_horizon_days) s+=' Risk horizon: '+esc(v.risk_horizon_days)+' trading days.';
+  s+='</div>';
   $('scoreCard').innerHTML=s;
 
   const hasC=data.candles&&data.candles.length>0;
   $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>Up candle</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>Nasdaq-100 close</span>')
-   +'<span><i style="background:'+UP+'"></i>Call: BUY</span><span><i style="background:'+DOWN+'"></i>Call: SELL</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
+   +'<span><i style="background:'+DOWN+'"></i>Risk alert</span><span><i style="background:'+UP+'"></i>No risk alert</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
   $('chartMsg').textContent=hasC?'':'Candlesticks need hourly QQQ data: connect your Alpaca keys and let the hourly collector run. Showing the Nasdaq-100 daily close until then.';
 }
 
@@ -200,21 +216,22 @@ function draw(){
   const priceAt=(dd,k)=>{const c=S.cmap[dd];if(c)return k==='h'?c.h:c.l;const i=data.dates.indexOf(dd);return i<0?null:data.closes[i]};
   let prev=null;
   S.dates.forEach((dd,i)=>{const m=S.calls[dd];if(!m)return;
-    x.fillStyle=m.v==='BUY'?UP+'99':DOWN;x.fillRect(X(i)-step/2+.3,geo.stripY,Math.max(1,step-.6),stripH/2-2);
+    const alert=m.risk_alert??(m.v==='SELL');x.fillStyle=alert?DOWN+'99':UP+'99';x.fillRect(X(i)-step/2+.3,geo.stripY,Math.max(1,step-.6),stripH/2-2);
     x.fillStyle=m.o==null?GREY:(m.o?'#22c55e':'#ef4444');x.fillRect(X(i)-step/2+.3,geo.stripY+stripH/2,Math.max(1,step-.6),stripH/2-2);
-    if(prev!==m.v){const py=m.v==='SELL'?Y(priceAt(dd,'h')??lo)-10:Y(priceAt(dd,'l')??hi)+10;
-      x.fillStyle=m.v==='SELL'?DOWN:UP;x.font='12px system-ui';x.textAlign='center';x.fillText(m.v==='SELL'?'▼':'▲',X(i),py)}
-    prev=m.v});
+    const state=alert?'RISK_ALERT':'NO_ALERT';
+    if(prev!==state){const py=alert?Y(priceAt(dd,'h')??lo)-10:Y(priceAt(dd,'l')??hi)+10;
+      x.fillStyle=alert?DOWN:UP;x.font='12px system-ui';x.textAlign='center';x.fillText(alert?'!':'·',X(i),py)}
+    prev=state});
   // date axis
   x.fillStyle=MUTED;x.font='11px system-ui';x.textAlign='center';x.textBaseline='top';
   const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));x.fillText(S.dates[i].slice(5),X(i),h-axisH+6)}
   // forecast zone
   const fx=padL+plotW+ (fz>0?6:0), v=data.verdict||{};
   x.textBaseline='middle';
-  if(!v.error&&!v.interim&&v.verdict){const buy=v.verdict==='BUY',col=buy?UP:DOWN,cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
+  if(!v.error&&!v.interim&&v.verdict){const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD',col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
     x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
-    x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(buy?'▲':'▼',cx,cy);
-    x.font='600 13px system-ui';x.fillText(v.verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('alarm '+pct(v.alarm_level,0),cx,cy+66)}
+    x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■'),cx,cy);
+    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('alarm '+pct(v.alarm_level,0),cx,cy+66)}
   else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('Model view',padL+plotW+fz/2-10,top+plotH*.4)}
   // hover line
   if(hover>=0&&hover<N){x.strokeStyle='#8da2bb66';x.lineWidth=1;x.setLineDash([3,3]);x.beginPath();x.moveTo(X(hover),top);x.lineTo(X(hover),top+plotH+gap+stripH);x.stroke();x.setLineDash([])}
@@ -238,7 +255,7 @@ $('chart').addEventListener('mousemove',e=>{
   if(i<0||i>=geo.N){hover=-1;$('tip').style.display='none';draw();return}
   hover=i;const dd=geo.S.dates[i],c=geo.S.cmap[dd],m=geo.S.calls[dd],close=(c&&c.c)??data.closes[data.dates.indexOf(dd)];
   let t='<b>'+dd+'</b><br>'+(c?'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c):'Close '+fmt(close));
-  if(m)t+='<br><span style="color:'+(m.v==='BUY'?UP:DOWN)+'"><b>Model: '+m.v+'</b></span> · drop risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Call was right</span>':'<span style="color:#ef4444">Call was wrong</span>'));
+  if(m){const alert=m.risk_alert??(m.v==='SELL');t+='<br><span style="color:'+(alert?DOWN:UP)+'"><b>Risk model: '+(alert?'ALERT':'NO ALERT')+'</b></span> · drawdown risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Risk classification was right</span>':'<span style="color:#ef4444">Risk classification was wrong</span>'));}
   const tip=$('tip');tip.innerHTML=t;tip.style.display='block';const tx=Math.min(mx+14,r.width-190);tip.style.left=tx+'px';tip.style.top='10px';draw()});
 $('chart').addEventListener('mouseleave',()=>{hover=-1;$('tip').style.display='none';draw()});
 $('range').addEventListener('change',load);
