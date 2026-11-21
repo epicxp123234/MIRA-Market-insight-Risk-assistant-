@@ -1,5 +1,5 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-import socket, sys
+import socket, sys, threading
 
 class QuietServer(ThreadingHTTPServer):
     """Same as ThreadingHTTPServer, except it doesn't print a scary traceback when a browser tab just cancels a poll mid-response (normal when a page refreshes or a newer request replaces an older one) - a real error still prints normally."""
