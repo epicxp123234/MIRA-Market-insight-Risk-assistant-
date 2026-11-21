@@ -43,7 +43,7 @@ canvas{display:block;width:100%}
 #chart{height:430px}
 #tick{height:90px;margin-top:8px}
 #tip{position:absolute;pointer-events:none;background:#0c1422ee;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:none;min-width:170px;z-index:3}
-.note{color:var(--muted);font-size:12.5px;margin:14px 2px 0}
+.layerinfo{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.layerinfo span{font-size:11px;color:var(--muted);background:#0c1422;border:1px solid var(--line);border-radius:7px;padding:6px 8px}.note{color:var(--muted);font-size:12.5px;margin:14px 2px 0}
 .note b{color:var(--text)}
 .msg{color:var(--warn);font-size:13px;margin:8px 0 0}
 </style>
@@ -61,6 +61,14 @@ canvas{display:block;width:100%}
   <section class="top">
     <div class="card" id="verdictCard"><h2>Model's view right now</h2><div class="sub">Loading…</div></div>
     <div class="card" id="scoreCard"><h2>How often is it right? (days it never saw)</h2><div class="sub">Loading…</div></div>
+  </section>
+
+  <section class="card chartcard" id="quantCard">
+    <div class="ctrl"><div><h2 style="margin:0;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)">Quantitative calculation engine</h2><div class="sub" id="quantMeta">Loading latest causal calculations…</div></div><span class="chip">COMPUTED FROM OFFICIAL CLOSES</span></div>
+    <div class="stats" id="quantStats"><div class="stat"><b>—</b><span>Bayesian drift</span></div><div class="stat"><b>—</b><span>Kalman trend</span></div><div class="stat"><b>—</b><span>GARCH volatility</span></div><div class="stat"><b>—</b><span>HMM regime probability</span></div></div>
+    <div class="layerinfo" id="quantDetails"></div>
+    <p class="sub" id="quantFusion" style="margin:12px 0 0">The learned model uses calculated features and validation-weighted directional experts. Statistical risk diagnostics are shown separately unless their contribution is explicitly present in the fusion.</p>
+    <details style="margin-top:10px"><summary class="sub">Calculation methods and equations</summary><div class="layerinfo"><span>Log return: rₜ = ln(Pₜ / Pₜ₋₁)</span><span>Bayesian: Normal prior + Normal likelihood → posterior P(μ &gt; 0)</span><span>Kalman: state prediction → innovation → gain-weighted update</span><span>GARCH: σ²ₜ₊₁ = ω + αε²ₜ + βσ²ₜ</span><span>HMM: Baum–Welch EM + forward state filter</span><span>Logistic: AD gradient + exact Hessian → damped Newton step</span></div></details>
   </section>
 
   <section class="card chartcard">
@@ -90,13 +98,15 @@ let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1;
 const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
 const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
+function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM fit rows: '+(hm.fit_rows||'—')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='The learned directional model combines its neural, logistic and trend experts when validated. Bayesian, Kalman, GARCH and HMM calculations provide separate statistical context.'}}
+
 async function load(){
   try{
     const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):('/api/chart?days='+$('range').value),{cache:'no-store'});
     const j=await r.json();
     if(j.error){throw new Error(j.error)}
     if(STATIC){const n=+$('range').value,k=Math.max(0,j.dates.length-n),first=j.dates[k];j.dates=j.dates.slice(k);j.closes=j.closes.slice(k);j.candles=(j.candles||[]).filter(c=>c.d>=first);j.replay=(j.replay||[]).filter(m=>m.d>=first)}
-    data=j; $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok';
+    data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok';
     absorbLive(); renderCards(); draw(); drawTick();
   }catch(e){
     $('chipServer').textContent='Server not reachable'; $('chipServer').className='chip bad';
@@ -109,7 +119,7 @@ function absorbLive(){
     const t=Date.now(); const last=liveBuf[liveBuf.length-1];
     if(!last||last.p!==Number(L.last)||t-last.t>20000) liveBuf.push({t,p:Number(L.last)});
     if(liveBuf.length>240) liveBuf.shift();
-    $('chipLive').textContent='QQQ '+fmt(L.last)+(L.day_change_pct!=null?'  '+(L.day_change_pct>=0?'+':'')+(L.day_change_pct*100).toFixed(2)+'%':'')+' · '+(L.session||'');
+    $('chipLive').textContent='QQQ '+fmt(L.last)+(L.day_change_pct!=null?'  '+(L.day_change_pct>=0?'+':'')+(L.day_change_pct*100).toFixed(2)+'%':'')+' · '+(L.session||'')+(L.streaming?' · WS':'');
     $('chipLive').className='chip ok';
   }else{
     $('chipLive').textContent='Live price off · connect Alpaca keys'; $('chipLive').className='chip';
@@ -118,33 +128,37 @@ function absorbLive(){
 }
 
 function renderCards(){
-  const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{};
+  const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{}, f=v.fusion||{};
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let h='<h2>Unified decision</h2>';
+  const pp=x=>x==null||!Number.isFinite(Number(x))?'—':(Number(x)*100).toFixed(1)+'%';
+  let h='<h2>Unified probabilistic decision · next session</h2>';
   if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
-  else if(v.interim){
-    h+='<div class="verdict"><div class="big hold">HOLD</div><div class="sub">Risk model unavailable or training. No directional call is issued.</div></div>';
-    h+='<div class="sub" style="margin-top:10px">Trend context: <b>'+esc(v.trend_verdict||'—')+'</b> · '+esc(v.brain_job||'Waiting for model')+'</div>';
-  }else{
+  else{
     const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD';
     const cls=verdict.toLowerCase(), icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
     const risk=Number(v.risk_score), alarm=Number(v.alarm_level);
     const validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0;
-    const max=validRisk?Math.max(.4,alarm*1.6,risk*1.2):.4;
-    const riskAlert=!!v.risk_alert || (validRisk&&risk>=alarm);
-    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next month')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
-    h+='<div class="gauge"><div class="bar"><div class="fill" style="width:'+(validRisk?Math.min(100,risk/max*100):0)+'%;background:'+(riskAlert?DOWN:UP)+'"></div><div class="tick" style="left:'+(validRisk?Math.min(100,alarm/max*100):0)+'%"></div></div>';
-    h+='<div class="glabel"><span>8%+ drawdown risk: <b style="color:var(--text)">'+(validRisk?pct(risk,0):'—')+'</b></span><span>Alarm '+(validRisk?pct(alarm,0):'—')+'</span></div></div>';
+    const riskAlert=validRisk&&risk>=alarm;
+    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next session')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
     h+='<div class="stats" style="margin-top:14px">';
-    h+='<div class="stat"><b>'+esc(v.trend_verdict||'—')+'</b><span>Trend-rule direction (source of BUY/SELL)</span></div>';
-    h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(riskAlert?'ALERT ACTIVE':'BELOW ALARM')+'</b><span>Independent downside-risk classification</span></div>';
+    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Fused probability of next-session rise</span></div>';
+    h+='<div class="stat"><b>'+pp(f.direction_model_probability)+'</b><span>Calibrated directional neural ensemble</span></div>';
+    h+='<div class="stat"><b>'+pp(f.trend_conditional_probability)+'</b><span>Trend-conditioned probability · state '+esc(f.trend_state||'—')+'</span></div>';
+    h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(validRisk?pp(risk):'—')+'</b><span>Separate 21-session 8%+ drawdown risk · alarm '+(validRisk?pp(alarm):'—')+'</span></div>';
     h+='</div>';
-    h+='<div class="sub" style="margin-top:12px"><b>Why this decision:</b> '+esc(v.decision_reason||'No explanation supplied.')+'</div>';
-    h+='<div class="sub" style="margin-top:6px">Decision status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Risk model is not a directional model.</div>';
+    if(f.weights) h+='<div class="sub" style="margin-top:10px">Validation/live reliability weights: direction '+pp(f.weights.direction)+' · trend '+pp(f.weights.trend)+'. Weights are based on validation log-loss skill, with a small update from matured real outcomes where enough observations exist.</div>';
+    if(f.online_weight_update) h+='<div class="sub" style="margin-top:5px">Online weight update: '+(f.online_weight_update.applied?'applied':'not applied')+' · '+esc(f.online_weight_update.matured_observations||0)+' matured outcomes · '+esc(f.online_weight_update.reason||f.online_weight_update.shrinkage||'')+'</div>';
+    if(f.holdout_edge_pp!=null){
+      const ci=f.holdout_edge_ci_pp||[];
+      h+='<div class="sub" style="margin-top:6px">Untouched holdout edge vs majority baseline: <b>'+Number(f.holdout_edge_pp).toFixed(2)+' pp</b>'+(ci.length===2?' · 95% 5-session block-bootstrap interval '+Number(ci[0]).toFixed(2)+' to '+Number(ci[1]).toFixed(2)+' pp':'')+' · '+esc(f.holdout_rows||'—')+' observations.</div>';
+    }
+    h+='<div class="sub" style="margin-top:12px"><b>Why this decision:</b> '+esc(v.decision_reason||f.reason||'No explanation supplied.')+'</div>';
+    h+='<div class="sub" style="margin-top:6px">Status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Directional model horizon: next session only. Drawdown risk is a separate overlay, not an opposite-direction vote.</div>';
+    if(v.risk_model_fresh===false) h+='<div class="sub" style="margin-top:6px;color:var(--warn)">Risk model refresh is due; the directional fusion is evaluated independently.</div>';
   }
   $('verdictCard').innerHTML=h;
 
-  let s='<h2>How well does the risk model detect drawdowns? (held-out days)</h2>';
+  let s='<h2>Downside-risk model evaluation · held-out days</h2>';
   if(sb.available){
     const accuracy=sb.risk_classification_accuracy??sb.call_accuracy;
     const baseline=sb.no_alert_baseline_accuracy??sb.always_buy_accuracy;
@@ -155,17 +169,23 @@ function renderCards(){
      +'<div class="stat"><b>'+pct(sb.drops_caught,0)+'</b><span>Of actual 8%+ drawdowns detected</span></div>'
      +'<div class="stat"><b>'+pct(sb.alarm_precision,0)+'</b><span>Alerts followed by an 8%+ drawdown (base rate '+pct(sb.drop_base_rate,0)+')</span></div>'
      +'</div>';
-    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Historical strategy simulation: '+pct(sb.strategy.cagr)+'/yr, worst drawdown '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold '+pct(sb.buy_and_hold.cagr)+'/yr, worst drawdown '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' held-out days). These are historical simulations, not expected returns.</div>';
-  }else s+='<div class="sub">Held-out test results appear once the model has trained.</div>';
+    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Historical strategy simulation: '+pct(sb.strategy.cagr)+'/yr, worst drawdown '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold '+pct(sb.buy_and_hold.cagr)+'/yr, worst drawdown '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' held-out days). Historical only.</div>';
+  }else s+='<div class="sub">Held-out risk test results appear once the risk model has trained.</div>';
   const lm=lr.month_graded? lr.month_right+' of '+lr.month_graded+' risk classifications correct (no-alert baseline: '+lr.month_always_buy_right+')':'none graded yet';
-  s+='<div class="sub" style="margin-top:8px">Live risk-model record: '+(lr.calls||0)+' logged calls · month-ahead: '+lm+'.';
-  if(v.risk_horizon_days) s+=' Risk horizon: '+esc(v.risk_horizon_days)+' trading days.';
+  s+='<div class="sub" style="margin-top:8px">Live risk-classifier record: '+(lr.calls||0)+' logged calls · 21-session outcomes: '+lm+'.';
+  if(v.risk_horizon_days) s+=' Risk horizon: '+esc(v.risk_horizon_days)+' sessions.';
   s+='</div>';
+  const dl=lr.directional||{};
+  s+='<div class="sub" style="margin-top:8px">Live directional forecasts: '+esc(dl.matured||0)+' matured next-session outcomes · recent Brier score '+(dl.recent_brier==null?'—':Number(dl.recent_brier).toFixed(3))+' · BUY/SELL call accuracy '+pp(dl.signal_accuracy)+' across '+esc(dl.graded_signals||0)+' directional calls. HOLD probabilities are still evaluated through Brier/log-loss.</div>';
+  if(v.monte_carlo){
+    const mc=v.monte_carlo;
+    s+='<div class="sub" style="margin-top:10px"><b>Monte Carlo / moving-block bootstrap:</b> '+pp(mc.probability)+' estimated chance of an '+pp(mc.drop_threshold)+' drawdown over '+esc(mc.horizon_days)+' sessions, from '+esc(mc.simulations)+' simulated paths using '+esc(mc.block_length)+'-session blocks. '+esc(mc.interval_semantics||'')+'</div>';
+  }
   $('scoreCard').innerHTML=s;
 
   const hasC=data.candles&&data.candles.length>0;
   $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>Up candle</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>Nasdaq-100 close</span>')
-   +'<span><i style="background:'+DOWN+'"></i>Risk alert</span><span><i style="background:'+UP+'"></i>No risk alert</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
+   +'<span><i style="background:'+DOWN+'"></i>Historical risk alert</span><span><i style="background:'+UP+'"></i>No risk alert</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
   $('chartMsg').textContent=hasC?'':'Candlesticks need hourly QQQ data: connect your Alpaca keys and let the hourly collector run. Showing the Nasdaq-100 daily close until then.';
 }
 
@@ -231,7 +251,7 @@ function draw(){
   if(!v.error&&!v.interim&&v.verdict){const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD',col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
     x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
     x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■'),cx,cy);
-    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('alarm '+pct(v.alarm_level,0),cx,cy+66)}
+    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('P(up) '+pct(v.fusion&&v.fusion.next_session_up_probability,0),cx,cy+52);x.fillText('risk '+pct(v.risk_score,0),cx,cy+66)}
   else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('Model view',padL+plotW+fz/2-10,top+plotH*.4)}
   // hover line
   if(hover>=0&&hover<N){x.strokeStyle='#8da2bb66';x.lineWidth=1;x.setLineDash([3,3]);x.beginPath();x.moveTo(X(hover),top);x.lineTo(X(hover),top+plotH+gap+stripH);x.stroke();x.setLineDash([])}
