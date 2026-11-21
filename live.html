@@ -74,6 +74,9 @@ canvas{display:block;width:100%}
   <section class="card chartcard">
     <div class="ctrl">
       <div class="legend" id="legend"></div>
+      <label class="sub">Chart
+        <select id="chartMode"><option value="daily" selected>Daily history</option><option value="1m">Live · 1-minute candles</option></select>
+      </label>
       <label class="sub">Range
         <select id="range"><option value="90">3 months</option><option value="180" selected>6 months</option><option value="365">1 year</option></select>
       </label>
@@ -130,20 +133,21 @@ function absorbLive(){
 function renderCards(){
   const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{}, f=v.fusion||{};
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const pp=x=>x==null||!Number.isFinite(Number(x))?'—':(Number(x)*100).toFixed(1)+'%';
+  const pp=x=>x==null||!Number.isFinite(Number(x))?'Not available':(Number(x)*100).toFixed(1)+'%';
   let h='<h2>Unified probabilistic decision · next session</h2>';
   if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
   else{
-    const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD';
-    const cls=verdict.toLowerCase(), icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
+    const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);
+    const verdict=unavailable?'NO VALIDATED CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL');
+    const cls=verdict==='BUY'?'buy':verdict==='SELL'?'sell':'hold', icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
     const risk=Number(v.risk_score), alarm=Number(v.alarm_level);
     const validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0;
     const riskAlert=validRisk&&risk>=alarm;
     h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next session')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
     h+='<div class="stats" style="margin-top:14px">';
-    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Fused probability of next-session rise</span></div>';
-    h+='<div class="stat"><b>'+pp(f.direction_model_probability)+'</b><span>Calibrated directional neural ensemble</span></div>';
-    h+='<div class="stat"><b>'+pp(f.trend_conditional_probability)+'</b><span>Trend-conditioned probability · state '+esc(f.trend_state||'—')+'</span></div>';
+    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Fused probability of next-session rise'+(f.available?'':' · not validated')+'</span></div>';
+    h+='<div class="stat"><b>'+pp(f.direction_model_probability)+'</b><span>Calibrated neural expert'+(f.direction_model_probability==null?' · unavailable':'')+'</span></div>';
+    h+='<div class="stat"><b>'+pp(f.trend_conditional_probability)+'</b><span>Trend-conditioned probability · state '+esc(f.trend_state||'not available')+'</span></div>';
     h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(validRisk?pp(risk):'—')+'</b><span>Separate 21-session 8%+ drawdown risk · alarm '+(validRisk?pp(alarm):'—')+'</span></div>';
     h+='</div>';
     if(f.weights) h+='<div class="sub" style="margin-top:10px">Validation/live reliability weights: direction '+pp(f.weights.direction)+' · trend '+pp(f.weights.trend)+'. Weights are based on validation log-loss skill, with a small update from matured real outcomes where enough observations exist.</div>';
@@ -153,6 +157,7 @@ function renderCards(){
       h+='<div class="sub" style="margin-top:6px">Untouched holdout edge vs majority baseline: <b>'+Number(f.holdout_edge_pp).toFixed(2)+' pp</b>'+(ci.length===2?' · 95% 5-session block-bootstrap interval '+Number(ci[0]).toFixed(2)+' to '+Number(ci[1]).toFixed(2)+' pp':'')+' · '+esc(f.holdout_rows||'—')+' observations.</div>';
     }
     h+='<div class="sub" style="margin-top:12px"><b>Why this decision:</b> '+esc(v.decision_reason||f.reason||'No explanation supplied.')+'</div>';
+    if(unavailable){const job=v.directional_job||{};h+='<div class="sub" style="margin-top:6px;color:var(--warn)">This is not a HOLD forecast. It means MIRA cannot currently substantiate a directional call from a validated model. It will not manufacture BUY/SELL labels from diagnostic calculations.</div>';if(job.running||job.message)h+='<div class="sub" style="margin-top:5px">Directional model maintenance: '+esc(job.message||'status unavailable')+'</div>';}
     h+='<div class="sub" style="margin-top:6px">Status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Directional model horizon: next session only. Drawdown risk is a separate overlay, not an opposite-direction vote.</div>';
     if(v.risk_model_fresh===false) h+='<div class="sub" style="margin-top:6px;color:var(--warn)">Risk model refresh is due; the directional fusion is evaluated independently.</div>';
   }
@@ -186,31 +191,37 @@ function renderCards(){
   const hasC=data.candles&&data.candles.length>0;
   $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>Up candle</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>Nasdaq-100 close</span>')
    +'<span><i style="background:'+DOWN+'"></i>Historical risk alert</span><span><i style="background:'+UP+'"></i>No risk alert</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
-  $('chartMsg').textContent=hasC?'':'Candlesticks need hourly QQQ data: connect your Alpaca keys and let the hourly collector run. Showing the Nasdaq-100 daily close until then.';
+  const ist=data.intraday_status||{};
+  $('chartMsg').textContent=S.liveMode?((ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Minute candles update only when provider bars arrive; outside market hours the last completed candle remains unchanged.'):(hasC?'Daily candles are aggregated from saved hourly Alpaca bars. The daily close series is official historical data; intraday quote updates are shown separately.':'No historical OHLC candles saved yet; showing official daily closes until hourly OHLC data is available.');
 }
 
 function setup(cv){const r=cv.getBoundingClientRect();cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return {x,w:r.width,h:r.height}}
 
 function series(){
-  const d=data, dates=d.dates.slice(); const hasC=d.candles&&d.candles.length>0;
-  const cmap={}; (d.candles||[]).forEach(c=>cmap[c.d]=Object.assign({},c));
+  const d=data, liveMode=$('chartMode').value==='1m';
+  const minute=(d.intraday_candles||[]).slice();
+  const dates=liveMode?minute.map(c=>c.t):d.dates.slice();
+  const sourceCandles=liveMode?minute.map(c=>({d:c.t,o:c.o,h:c.h,l:c.l,c:c.c,live:true})):d.candles;
+  const hasC=sourceCandles&&sourceCandles.length>0;
+  const cmap={}; (sourceCandles||[]).forEach(c=>cmap[c.d]=Object.assign({},c));
   const L=d.live||{};
   const lastC=(d.candles||[]).slice(-1)[0];
-  if(hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<0.25){
+  if(!liveMode&&hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<0.25){
     const md=(L.market_time||'').slice(0,10), p=Number(L.last);
     if(md){ if(!dates.includes(md)&&md>dates[dates.length-1]) dates.push(md);
       const c=cmap[md]; if(c){c.c=p;c.h=Math.max(c.h,p);c.l=Math.min(c.l,p);c.live=true}
       else{const prev=[...dates].reverse().map(x=>cmap[x]).find(Boolean); const o=prev?prev.c:p; cmap[md]={d:md,o:o,h:Math.max(o,p),l:Math.min(o,p),c:p,live:true}} }
   }
   const idx={}; dates.forEach((x,i)=>idx[x]=i);
-  const calls={}; (d.replay||[]).forEach(m=>calls[m.d]=m);
-  return {dates,cmap,idx,calls,hasC};
+  const calls={}; if(!liveMode)(d.replay||[]).forEach(m=>calls[m.d]=m);
+  return {dates,cmap,idx,calls,hasC,liveMode};
 }
 
 function draw(){
   if(!data) return;
   const cv=$('chart'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
-  const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=26, gap=10;
+  const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=S.liveMode?0:26, gap=10;
+  if(!N){x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(S.liveMode?'No Alpaca minute bars are available. Connect Alpaca keys and check that the US market is open.':'No historical prices are available.',w/2,h/2);$('chartMsg').textContent=S.liveMode?'Live 1-minute candles require an authenticated Alpaca IEX feed. No synthetic candles are shown.':'Historical daily candles are unavailable.';return}
   const plotW=w-padL-padR-fz, plotH=h-top-axisH-stripH-gap, step=plotW/N;
   const X=i=>padL+(i+.5)*step;
   let lo=Infinity,hi=-Infinity;
@@ -232,10 +243,10 @@ function draw(){
     x.strokeStyle='#9fb3c8';x.lineWidth=1.6;x.stroke();
     x.lineTo(X(N-1),top+plotH);x.lineTo(X(0),top+plotH);x.closePath();const g=x.createLinearGradient(0,top,0,top+plotH);g.addColorStop(0,'#9fb3c833');g.addColorStop(1,'#9fb3c800');x.fillStyle=g;x.fill();
   }
-  // call strips + markers
+  // call strips + markers (daily replay only)
   const priceAt=(dd,k)=>{const c=S.cmap[dd];if(c)return k==='h'?c.h:c.l;const i=data.dates.indexOf(dd);return i<0?null:data.closes[i]};
   let prev=null;
-  S.dates.forEach((dd,i)=>{const m=S.calls[dd];if(!m)return;
+  if(!S.liveMode) S.dates.forEach((dd,i)=>{const m=S.calls[dd];if(!m)return;
     const alert=m.risk_alert??(m.v==='SELL');x.fillStyle=alert?DOWN+'99':UP+'99';x.fillRect(X(i)-step/2+.3,geo.stripY,Math.max(1,step-.6),stripH/2-2);
     x.fillStyle=m.o==null?GREY:(m.o?'#22c55e':'#ef4444');x.fillRect(X(i)-step/2+.3,geo.stripY+stripH/2,Math.max(1,step-.6),stripH/2-2);
     const state=alert?'RISK_ALERT':'NO_ALERT';
@@ -244,11 +255,11 @@ function draw(){
     prev=state});
   // date axis
   x.fillStyle=MUTED;x.font='11px system-ui';x.textAlign='center';x.textBaseline='top';
-  const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));x.fillText(S.dates[i].slice(5),X(i),h-axisH+6)}
+  const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));const label=S.liveMode?String(S.dates[i]).slice(11,16):String(S.dates[i]).slice(5);x.fillText(label,X(i),h-axisH+6)}
   // forecast zone
   const fx=padL+plotW+ (fz>0?6:0), v=data.verdict||{};
   x.textBaseline='middle';
-  if(!v.error&&!v.interim&&v.verdict){const verdict=['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'HOLD',col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
+  if(!v.error&&!v.interim&&v.verdict){const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);const verdict=unavailable?'NO CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL'),col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
     x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
     x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■'),cx,cy);
     x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('P(up) '+pct(v.fusion&&v.fusion.next_session_up_probability,0),cx,cy+52);x.fillText('risk '+pct(v.risk_score,0),cx,cy+66)}
@@ -278,9 +289,9 @@ $('chart').addEventListener('mousemove',e=>{
   if(m){const alert=m.risk_alert??(m.v==='SELL');t+='<br><span style="color:'+(alert?DOWN:UP)+'"><b>Risk model: '+(alert?'ALERT':'NO ALERT')+'</b></span> · drawdown risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Risk classification was right</span>':'<span style="color:#ef4444">Risk classification was wrong</span>'));}
   const tip=$('tip');tip.innerHTML=t;tip.style.display='block';const tx=Math.min(mx+14,r.width-190);tip.style.left=tx+'px';tip.style.top='10px';draw()});
 $('chart').addEventListener('mouseleave',()=>{hover=-1;$('tip').style.display='none';draw()});
-$('range').addEventListener('change',load);
+$('range').addEventListener('change',load);$('chartMode').addEventListener('change',()=>{hover=-1;load()});
 window.addEventListener('resize',()=>{draw();drawTick()});
-setInterval(load,STATIC?120000:10000);setInterval(()=>{if(data)drawTick()},400);
+setInterval(load,STATIC?120000:5000);setInterval(()=>{if(data)drawTick()},400);
 load();
 </script>
 </body>

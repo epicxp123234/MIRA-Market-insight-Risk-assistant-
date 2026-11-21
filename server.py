@@ -134,7 +134,8 @@ def market_session(now=None):
 
 
 MARKET_STREAM={"connected":False,"status":"not started","trade":None,"quote":None,
-               "bar":None,"last_message_at":None,"last_error":None}
+               "bar":None,"bars":[],"last_message_at":None,"last_error":None}
+MARKET_BARS_CACHE={"at":0.0,"bars":[]}
 MARKET_STREAM_LOCK=threading.Lock()
 MARKET_STREAM_STARTED=False
 
@@ -146,6 +147,7 @@ def market_stream_snapshot():
         trade=dict(MARKET_STREAM.get("trade") or {})
         quote=dict(MARKET_STREAM.get("quote") or {})
         connected=MARKET_STREAM.get("connected",False)
+        stream_bars=[dict(b) for b in MARKET_STREAM.get("bars",[])][-240:]
     if not connected or not trade.get("t") or trade.get("p") is None:
         return None
     try:
@@ -168,7 +170,7 @@ def market_stream_snapshot():
             "quote_at":quote.get("t"),"quote_age_seconds":None,
             "day_change_pct":change,"previous_close":previous,
             "market_time":datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "streaming":True,
+            "streaming":True,"minute_bars":stream_bars,"minute_bar":stream_bars[-1] if stream_bars else None,
             "disclaimer":"Live IEX single-venue quote/trade stream. It is not a consolidated all-exchange feed and is not itself a new model forecast."}
 
 def start_market_stream():
@@ -214,9 +216,17 @@ def start_market_stream():
                                 MARKET_STREAM["last_message_at"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
                             MARKET_STREAM["connected"]=True
                         elif kind in ("b","u"):
+                            bar={"t":item.get("t"),"o":item.get("o"),"h":item.get("h"),
+                                 "l":item.get("l"),"c":item.get("c"),"v":item.get("v")}
                             with MARKET_STREAM_LOCK:
-                                MARKET_STREAM["bar"]={"t":item.get("t"),"o":item.get("o"),"h":item.get("h"),
-                                                      "l":item.get("l"),"c":item.get("c"),"v":item.get("v")}
+                                MARKET_STREAM["bar"]=bar
+                                bars=MARKET_STREAM.setdefault("bars",[])
+                                # Alpaca 'u' updates the current minute; 'b' starts a new minute.
+                                if bars and bars[-1].get("t")==bar.get("t"):
+                                    bars[-1]=bar
+                                else:
+                                    bars.append(bar)
+                                if len(bars)>480: del bars[:-480]
                                 MARKET_STREAM["last_message_at"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
                 def on_error(ws,error):
                     MARKET_STREAM["last_error"]=str(error)[:180]
@@ -816,7 +826,15 @@ def start_nasdaq_training(force=False):
                 dates,_=_load_csv_series()
                 idx={d:i for i,d in enumerate(dates)}
                 old=idx.get(saved.get("as_of"),-10**9)
-                if len(dates)-1-old<21:
+                saved_fusion=saved.get("fusion") or {}
+                # Older model snapshots may contain the risk MLPs but no serving-ready
+                # directional calibration/fusion. Treat that as a rebuild requirement,
+                # even when the underlying daily history has not advanced 21 sessions.
+                fusion_missing=(not saved_fusion.get("available") or
+                                not saved_fusion.get("calibration") or
+                                not saved_fusion.get("weights") or
+                                not (saved_fusion.get("logistic_model") or {}).get("available"))
+                if len(dates)-1-old<21 and not fusion_missing:
                     return {"started":False,"message":"Directional ensemble is current; fewer than 21 new completed sessions."}
             except (OSError,json.JSONDecodeError,ValueError):
                 pass
@@ -2793,6 +2811,28 @@ def refresh_prices_background():
         threading.Thread(target=refresh_prices,args=(True,),daemon=True).start()
     # else: a refresh is already in flight (this request or the background loop) - don't pile on, just use what's on disk right now.
 
+def fetch_minute_bars(force=False):
+    """Fetch recent Alpaca IEX one-minute OHLCV bars; WebSocket bars take precedence."""
+    if not (MARKET_API_KEY and MARKET_API_SECRET): return []
+    now=time.time()
+    if not force and now-MARKET_BARS_CACHE["at"]<12:
+        return list(MARKET_BARS_CACHE["bars"])
+    try:
+        req=Request("https://data.alpaca.markets/v2/stocks/QQQ/bars?timeframe=1Min&adjustment=raw&feed=iex&sort=asc&limit=120",
+                    headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"})
+        with urlopen(req,timeout=8) as response: raw=json.loads(response.read())
+        bars=[]
+        for b in raw.get("bars") or []:
+            try:
+                vals={"t":b["t"],"o":float(b["o"]),"h":float(b["h"]),"l":float(b["l"]),"c":float(b["c"]),"v":float(b.get("v",0))}
+                if vals["o"]>0 and vals["h"]>=max(vals["o"],vals["c"]) and vals["l"]<=min(vals["o"],vals["c"]): bars.append(vals)
+            except (KeyError,TypeError,ValueError): continue
+        MARKET_BARS_CACHE.update({"at":now,"bars":bars[-240:]})
+    except Exception:
+        # Preserve last good bars during a temporary provider outage; never fabricate a candle.
+        pass
+    return list(MARKET_BARS_CACHE["bars"])
+
 def chart_payload(days=180):
     days=min((30,90,180,365,500),key=lambda k:abs(k-int(days))); now=time.time()
     if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
@@ -2815,11 +2855,24 @@ def chart_payload(days=180):
             # here incorrectly triggered the deliberate unsupported-horizon HOLD guard.
             v=final_verdict("next session")
             data["verdict"]={k:v.get(k) for k in ("verdict","confidence","interim","risk_score","alarm_level","risk_state","trend_verdict","brain_verdict","agree","risk_trend_alignment","decision_status","decision_reason","risk_horizon_days","model_data_as_of","model_data_source","data_age_calendar_days","data_fresh","risk_model_fresh","fusion","brain_job","as_of","monte_carlo")}
+            data["verdict"]["directional_job"]=dict(NASDAQ_JOB)
         except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
         CHART_CACHE.update({"at":now,"days":days,"data":data})
     out=dict(CHART_CACHE["data"])
-    try: out["live"]=fetch_market_snapshot()
-    except Exception as exc: out["live"]={"connected":False,"error":str(exc)[:100]}
+    try:
+        out["live"]=fetch_market_snapshot()
+        ws_bars=(out["live"].get("minute_bars") or []) if isinstance(out["live"],dict) else []
+        rest_bars=fetch_minute_bars()
+        merged={b.get("t"):b for b in rest_bars if b.get("t")}
+        for b in ws_bars:
+            if b.get("t"): merged[b["t"]]=b
+        out["intraday_candles"]=sorted(merged.values(),key=lambda b:b.get("t",""))[-240:]
+        out["intraday_status"]={"source":"Alpaca IEX 1-minute OHLCV","streaming":bool(ws_bars),
+                                "bars":len(out["intraday_candles"]),"status":"LIVE MINUTE BARS" if ws_bars else ("REST MINUTE BARS" if rest_bars else "WAITING FOR ALPACA MINUTE BARS")}
+    except Exception as exc:
+        out["live"]={"connected":False,"error":str(exc)[:100]}
+        out["intraday_candles"]=[]
+        out["intraday_status"]={"source":"Alpaca IEX","streaming":False,"bars":0,"status":"MINUTE BARS UNAVAILABLE"}
     return out
 
 CHAT_RATE={}
