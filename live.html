@@ -89,7 +89,7 @@ canvas{display:block;width:100%}
     <div class="msg" id="chartMsg"></div>
   </section>
 
-  <p class="note"><b>How to read this.</b> The neural model estimates downside risk (the chance of an 8%+ drawdown over its fixed horizon); it does not predict price direction. The trend rule supplies the directional signal. If the risk alarm is active, the unified decision is HOLD. In the chart, the first strip shows historical risk alerts (red = alert, teal = no alert); the second strip shows whether that risk classification was right (green = right, red = wrong, grey = too recent). These are historical out-of-sample risk evaluations, not guaranteed forecasts. Research output, not financial advice.</p>
+  <p class="note"><b>How to read this.</b> The price chart shows QQQ ETF candles from Alpaca IEX data. The research model is trained on official Nasdaq-100 daily closes, not QQQ. Its neural component estimates the chance of an 8%+ drawdown over 21 sessions; it does not predict price direction. When its risk alarm is active, MIRA reports HOLD. When no risk alarm is active, the separate trend rule may report BUY or SELL; no calibrated probability of a price rise is claimed. Historical Nasdaq-100 risk evaluations are kept separate from the QQQ price chart. Research output, not financial advice.</p>
 </main>
 
 <script>
@@ -101,7 +101,7 @@ let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1;
 const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
 const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
-function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM fit rows: '+(hm.fit_rows||'—')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='The learned directional model combines its neural, logistic and trend experts when validated. Bayesian, Kalman, GARCH and HMM calculations provide separate statistical context.'}}
+function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM: '+(hm.status||'not fitted')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='No validated directional probability ensemble is present. Bayesian and Kalman diagnostics plus a fixed-coefficient GARCH baseline are shown as statistical context; HMM is unavailable until fitted and validated.'}}
 
 async function load(){
   try{
@@ -127,14 +127,15 @@ function absorbLive(){
   }else{
     $('chipLive').textContent='Live price off · connect Alpaca keys'; $('chipLive').className='chip';
   }
-  $('chipData').textContent='Data through '+data.as_of;
+  const qqqDate=(data.dates||[]).slice(-1)[0];
+  $('chipData').textContent='QQQ candles through '+(qqqDate||'not available')+' · NDX research through '+(data.as_of||'—');
 }
 
 function renderCards(){
   const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{}, f=v.fusion||{};
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pp=x=>x==null||!Number.isFinite(Number(x))?'Not available':(Number(x)*100).toFixed(1)+'%';
-  let h='<h2>Unified probabilistic decision · next session</h2>';
+  let h='<h2>Risk-aware market decision · Nasdaq-100 research</h2>';
   if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
   else{
     const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);
@@ -145,7 +146,7 @@ function renderCards(){
     const riskAlert=validRisk&&risk>=alarm;
     h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next session')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
     h+='<div class="stats" style="margin-top:14px">';
-    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Fused probability of next-session rise'+(f.available?'':' · not validated')+'</span></div>';
+    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Validated next-session rise probability'+(f.available?'':' · not validated')+'</span></div>';
     h+='<div class="stat"><b>'+pp(f.direction_model_probability)+'</b><span>Calibrated neural expert'+(f.direction_model_probability==null?' · unavailable':'')+'</span></div>';
     h+='<div class="stat"><b>'+pp(f.trend_conditional_probability)+'</b><span>Trend-conditioned probability · state '+esc(f.trend_state||'not available')+'</span></div>';
     h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(validRisk?pp(risk):'—')+'</b><span>Separate 21-session 8%+ drawdown risk · alarm '+(validRisk?pp(alarm):'—')+'</span></div>';
@@ -189,10 +190,9 @@ function renderCards(){
   $('scoreCard').innerHTML=s;
 
   const hasC=data.candles&&data.candles.length>0;
-  $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>Up candle</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>Nasdaq-100 close</span>')
-   +'<span><i style="background:'+DOWN+'"></i>Historical risk alert</span><span><i style="background:'+UP+'"></i>No risk alert</span><span><i style="background:#22c55e"></i>Right</span><span><i style="background:#ef4444"></i>Wrong</span><span><i style="background:'+GREY+'"></i>Too recent</span>';
+  $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>QQQ up candle</span><span><i style="background:'+DOWN+'"></i>QQQ down candle</span>':'<span><i style="background:#9fb3c8"></i>QQQ close</span>');
   const ist=data.intraday_status||{};
-  $('chartMsg').textContent=S.liveMode?((ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Minute candles update only when provider bars arrive; outside market hours the last completed candle remains unchanged.'):(hasC?'Daily candles are aggregated from saved hourly Alpaca bars. The daily close series is official historical data; intraday quote updates are shown separately.':'No historical OHLC candles saved yet; showing official daily closes until hourly OHLC data is available.');
+  $('chartMsg').textContent=S.liveMode?((ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Only provider-supplied bars are shown; outside market hours the last completed candle remains unchanged.'):(hasC?'QQQ daily OHLC is aggregated from saved Alpaca IEX hourly bars. The Nasdaq-100 research model is separate and is not overlaid on QQQ candles. Missing QQQ sessions are not filled with synthetic candles.':'QQQ daily candles are unavailable. Connect Alpaca keys and allow hourly history to collect; Nasdaq-100 research data is not substituted.');
 }
 
 function setup(cv){const r=cv.getBoundingClientRect();cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return {x,w:r.width,h:r.height}}
@@ -220,13 +220,13 @@ function series(){
 function draw(){
   if(!data) return;
   const cv=$('chart'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
-  const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=S.liveMode?0:26, gap=10;
-  if(!N){x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(S.liveMode?'No Alpaca minute bars are available. Connect Alpaca keys and check that the US market is open.':'No historical prices are available.',w/2,h/2);$('chartMsg').textContent=S.liveMode?'Live 1-minute candles require an authenticated Alpaca IEX feed. No synthetic candles are shown.':'Historical daily candles are unavailable.';return}
+  const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=0, gap=10;
+  if(!N||!S.hasC){x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(S.liveMode?'No Alpaca minute bars are available. Connect Alpaca keys and check that the US market is open.':'No QQQ daily candles are available. Connect Alpaca keys and collect hourly history.',w/2,h/2);$('chartMsg').textContent=S.liveMode?'Live 1-minute candles require authenticated Alpaca IEX bars. No synthetic candles are shown.':'QQQ daily OHLC is unavailable; Nasdaq-100 closes are not substituted.';return}
   const plotW=w-padL-padR-fz, plotH=h-top-axisH-stripH-gap, step=plotW/N;
   const X=i=>padL+(i+.5)*step;
   let lo=Infinity,hi=-Infinity;
   if(S.hasC){S.dates.forEach(dd=>{const c=S.cmap[dd];if(c){lo=Math.min(lo,c.l);hi=Math.max(hi,c.h)}})}
-  else{data.closes.forEach(v=>{lo=Math.min(lo,v);hi=Math.max(hi,v)})}
+  else{lo=0;hi=1}
   const pad=(hi-lo)*.08||1; lo-=pad; hi+=pad*1.6;
   const Y=v=>top+(hi-v)/(hi-lo)*plotH;
   geo={S,N,X,Y,step,padL,plotW,top,plotH,stripY:top+plotH+gap,stripH,w,h};
@@ -238,21 +238,9 @@ function draw(){
       x.strokeStyle=col;x.lineWidth=1;x.beginPath();x.moveTo(xx,Y(c.h));x.lineTo(xx,Y(c.l));x.stroke();
       const bw=Math.max(1.5,step*.62),y1=Y(Math.max(c.o,c.c)),y2=Y(Math.min(c.o,c.c));
       if(c.live){x.strokeStyle=col;x.strokeRect(xx-bw/2,y1,bw,Math.max(1.5,y2-y1))}else{x.fillStyle=col;x.fillRect(xx-bw/2,y1,bw,Math.max(1.5,y2-y1))}});
-  }else{
-    x.beginPath();data.closes.forEach((v,i)=>{const xx=X(i),yy=Y(v);i?x.lineTo(xx,yy):x.moveTo(xx,yy)});
-    x.strokeStyle='#9fb3c8';x.lineWidth=1.6;x.stroke();
-    x.lineTo(X(N-1),top+plotH);x.lineTo(X(0),top+plotH);x.closePath();const g=x.createLinearGradient(0,top,0,top+plotH);g.addColorStop(0,'#9fb3c833');g.addColorStop(1,'#9fb3c800');x.fillStyle=g;x.fill();
   }
-  // call strips + markers (daily replay only)
-  const priceAt=(dd,k)=>{const c=S.cmap[dd];if(c)return k==='h'?c.h:c.l;const i=data.dates.indexOf(dd);return i<0?null:data.closes[i]};
-  let prev=null;
-  if(!S.liveMode) S.dates.forEach((dd,i)=>{const m=S.calls[dd];if(!m)return;
-    const alert=m.risk_alert??(m.v==='SELL');x.fillStyle=alert?DOWN+'99':UP+'99';x.fillRect(X(i)-step/2+.3,geo.stripY,Math.max(1,step-.6),stripH/2-2);
-    x.fillStyle=m.o==null?GREY:(m.o?'#22c55e':'#ef4444');x.fillRect(X(i)-step/2+.3,geo.stripY+stripH/2,Math.max(1,step-.6),stripH/2-2);
-    const state=alert?'RISK_ALERT':'NO_ALERT';
-    if(prev!==state){const py=alert?Y(priceAt(dd,'h')??lo)-10:Y(priceAt(dd,'l')??hi)+10;
-      x.fillStyle=alert?DOWN:UP;x.font='12px system-ui';x.textAlign='center';x.fillText(alert?'!':'·',X(i),py)}
-    prev=state});
+  // NDX risk-model replay is deliberately kept off the QQQ price axis:
+  // it is a different instrument and must not be date/price-aligned as if identical.
   // date axis
   x.fillStyle=MUTED;x.font='11px system-ui';x.textAlign='center';x.textBaseline='top';
   const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));const label=S.liveMode?String(S.dates[i]).slice(11,16):String(S.dates[i]).slice(5);x.fillText(label,X(i),h-axisH+6)}
@@ -262,8 +250,8 @@ function draw(){
   if(!v.error&&!v.interim&&v.verdict){const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);const verdict=unavailable?'NO CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL'),col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
     x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
     x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■'),cx,cy);
-    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('P(up) '+pct(v.fusion&&v.fusion.next_session_up_probability,0),cx,cy+52);x.fillText('risk '+pct(v.risk_score,0),cx,cy+66)}
-  else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('Model view',padL+plotW+fz/2-10,top+plotH*.4)}
+    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('NDX risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('Trend '+(v.trend_verdict||'—'),cx,cy+66)}
+  else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('NDX research',padL+plotW+fz/2-10,top+plotH*.4)}
   // hover line
   if(hover>=0&&hover<N){x.strokeStyle='#8da2bb66';x.lineWidth=1;x.setLineDash([3,3]);x.beginPath();x.moveTo(X(hover),top);x.lineTo(X(hover),top+plotH+gap+stripH);x.stroke();x.setLineDash([])}
 }
@@ -284,8 +272,8 @@ function drawTick(){
 $('chart').addEventListener('mousemove',e=>{
   if(!geo||!data)return;const r=$('chart').getBoundingClientRect(),mx=e.clientX-r.left,i=Math.round((mx-geo.padL)/geo.step-.5);
   if(i<0||i>=geo.N){hover=-1;$('tip').style.display='none';draw();return}
-  hover=i;const dd=geo.S.dates[i],c=geo.S.cmap[dd],m=geo.S.calls[dd],close=(c&&c.c)??data.closes[data.dates.indexOf(dd)];
-  let t='<b>'+dd+'</b><br>'+(c?'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c):'Close '+fmt(close));
+  hover=i;const dd=geo.S.dates[i],c=geo.S.cmap[dd],m=geo.S.calls[dd],close=(c&&c.c)??null;
+  let t='<b>'+dd+'</b><br>'+(c?'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c) : 'QQQ candle unavailable');
   if(m){const alert=m.risk_alert??(m.v==='SELL');t+='<br><span style="color:'+(alert?DOWN:UP)+'"><b>Risk model: '+(alert?'ALERT':'NO ALERT')+'</b></span> · drawdown risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Risk classification was right</span>':'<span style="color:#ef4444">Risk classification was wrong</span>'));}
   const tip=$('tip');tip.innerHTML=t;tip.style.display='block';const tx=Math.min(mx+14,r.width-190);tip.style.left=tx+'px';tip.style.top='10px';draw()});
 $('chart').addEventListener('mouseleave',()=>{hover=-1;$('tip').style.display='none';draw()});

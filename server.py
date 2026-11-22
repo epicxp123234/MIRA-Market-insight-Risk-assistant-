@@ -40,6 +40,9 @@ MARKET_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 MARKET_API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 MARKET_CACHE = {"at":0.0,"data":None}
 MARKET_REFRESH_LOCK = threading.Lock()
+MINUTE_CACHE={"at":0.0,"bars":[],"status":"not fetched","error":None}
+MINUTE_REFRESH_LOCK=threading.Lock()
+
 
 def credential_db_path():
     base=Path(os.environ.get("LOCALAPPDATA",str(Path.home()/"AppData"/"Local")))
@@ -173,6 +176,48 @@ def fetch_market_snapshot(force=False):
     result={"connected":True,"configured":True,"provider":"Alpaca Basic · "+feed_note,"feed":feed,"symbol":"QQQ","instrument":"Invesco QQQ ETF · Nasdaq-100 proxy","session":session,"freshness":freshness,"last":display_price,"price_label":"Indicative midpoint" if feed=="overnight" else "Latest trade","trade_at":stamp,"age_seconds":age,"bid":bid,"ask":ask,"quote_at":quote_stamp,"quote_age_seconds":quote_age,"day_change_pct":change,"day_high":day.get("h"),"day_low":day.get("l"),"previous_close":previous,"market_time":now.isoformat(timespec="seconds"),"disclaimer":"Quote feed is separate from the daily-trained neural forecast; the model does not use this intraday quote to generate its probability."}
     MARKET_CACHE={"at":time.time(),"data":result}
     return result
+
+
+def fetch_minute_bars(force=False):
+    """Fetch real completed Alpaca IEX 1-minute QQQ bars; never synthesize candles."""
+    if not (MARKET_API_KEY and MARKET_API_SECRET):
+        return {"bars":[],"status":"Alpaca keys not configured","error":"Connect Alpaca keys to enable 1-minute candles."}
+    if not force and MINUTE_CACHE["bars"] and time.time()-MINUTE_CACHE["at"]<15:
+        return {"bars":MINUTE_CACHE["bars"],"status":"cached Alpaca IEX 1-minute bars","error":None}
+    end=datetime.now(timezone.utc); start=end-timedelta(days=2)
+    params=("timeframe=1Min&adjustment=raw&feed=iex&sort=asc&limit=10000"
+            "&start="+start.strftime("%Y-%m-%dT%H:%M:%SZ")+
+            "&end="+end.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    req=Request("https://data.alpaca.markets/v2/stocks/QQQ/bars?"+params,
+        headers={"APCA-API-KEY-ID":MARKET_API_KEY,
+                 "APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"})
+    try:
+        with urlopen(req,timeout=12) as response: raw=json.loads(response.read())
+        bars=[]
+        for b in raw.get("bars") or []:
+            try:
+                row={"t":b["t"],"o":float(b["o"]),"h":float(b["h"]),
+                     "l":float(b["l"]),"c":float(b["c"]),"v":float(b.get("v",0))}
+                if row["o"]>0 and row["h"]>=max(row["o"],row["c"]) and row["l"]<=min(row["o"],row["c"]):
+                    bars.append(row)
+            except (KeyError,TypeError,ValueError): continue
+        bars=sorted({b["t"]:b for b in bars}.values(),key=lambda x:x["t"])[-1000:]
+        MINUTE_CACHE.update({"at":time.time(),"bars":bars,
+            "status":"%d real Alpaca IEX 1-minute bars"%len(bars),"error":None})
+        return {"bars":bars,"status":MINUTE_CACHE["status"],"error":None}
+    except Exception as exc:
+        message="Alpaca minute-bar request failed: "+(str(exc)[:150] or exc.__class__.__name__)
+        MINUTE_CACHE["error"]=message
+        return {"bars":MINUTE_CACHE["bars"],"status":"minute-bar feed unavailable","error":message}
+
+def refresh_minute_bars_background():
+    if not (MARKET_API_KEY and MARKET_API_SECRET): return
+    if not MINUTE_REFRESH_LOCK.acquire(blocking=False): return
+    def _worker():
+        try: fetch_minute_bars(force=True)
+        finally: MINUTE_REFRESH_LOCK.release()
+    threading.Thread(target=_worker,daemon=True,name="mira-alpaca-1m").start()
+
 
 def make_case(kind, ident):
     x = [random.uniform(-1, 1) for _ in range(4)]
@@ -532,10 +577,8 @@ def _load_csv_series():
     return dates,closes
 
 def load_price_series():
-    dates,closes=_load_csv_series()
-    for d,v,_src in (PRICE_STATE.get("extra") or []):
-        if d>dates[-1]: dates.append(d); closes.append(v)
-    return dates,closes
+    """Official Nasdaq-100 observations only. QQQ is a separate ETF instrument."""
+    return _load_csv_series()
 
 FRED_API_KEY=os.environ.get("FRED_API_KEY","").strip()
 def _fred_api(series_id,start):
@@ -616,24 +659,23 @@ def refresh_prices(force=False):
                 visible_status("preparing","Price update: added %d new official close%s through %s."%(len(keep),"" if len(keep)==1 else "s",last))
             PRICE_STATE["fred"]="ok, %d new close%s"%(len(keep),"" if len(keep)==1 else "s")
         except Exception as exc: PRICE_STATE["fred"]="unavailable (%s)"%(str(exc)[:60] or exc.__class__.__name__)
-        extra=[]
-        if MARKET_API_KEY and MARKET_API_SECRET:
-            try: extra=_alpaca_chain(last,closes[-1]); PRICE_STATE["alpaca"]="ok, %d live day%s"%(len(extra),"" if len(extra)==1 else "s")
-            except Exception as exc: PRICE_STATE["alpaca"]="unavailable (%s)"%(str(exc)[:60] or exc.__class__.__name__)
-        else: PRICE_STATE["alpaca"]="not connected"
-        PRICE_STATE["extra"]=extra; PRICE_STATE["last_csv_date"]=last; PRICE_STATE["updated"]=datetime.now().isoformat(timespec="seconds")
+        # Never splice QQQ ETF returns into the Nasdaq-100 index history.
+        PRICE_STATE["alpaca"]="not used for NDX history (QQQ is a separate ETF)"
+        PRICE_STATE["extra"]=[]
+        PRICE_STATE["last_csv_date"]=last
+        PRICE_STATE["updated"]=datetime.now().isoformat(timespec="seconds")
         return PRICE_STATE
 
 def price_data_note():
-    dates,_=load_price_series(); csv_last=PRICE_STATE.get("last_csv_date") or dates[-1]; et=eastern_now()
-    ex=PRICE_STATE.get("extra") or []; note="Data: official daily closes through %s"%csv_last
-    if ex:
-        live=ex[-1][0]; is_today=(live==et.date().isoformat() and market_session(et)!="closed" and et.time().replace(tzinfo=None)<dt_time(16))
-        note+=", plus %d day%s estimated from live QQQ prices through %s%s"%(len(ex),"" if len(ex)==1 else "s",live," (that trading day is not finished, so this estimate can still change)" if is_today else "")
-    elif PRICE_STATE["alpaca"]=="not connected": note+=" (connect free Alpaca keys on the Live market data panel to include today's live move)"
-    if PRICE_STATE.get("updated"): note+="; auto-update last ran %s (official closes: %s)"%(PRICE_STATE["updated"].replace("T"," "),PRICE_STATE["fred"])
+    dates,_=load_price_series()
+    csv_last=PRICE_STATE.get("last_csv_date") or dates[-1]
+    et=eastern_now()
+    note="Nasdaq-100 research series: official FRED daily closes through %s; QQQ prices are not substituted into this series"%csv_last
+    if PRICE_STATE.get("updated"):
+        note+="; last official-data refresh %s (%s)"%(PRICE_STATE["updated"].replace("T"," "),PRICE_STATE["fred"])
     lag=(et.date()-date.fromisoformat(dates[-1])).days
-    if lag>4: note+=". WARNING: the newest price is %d days old, so check your internet connection; this answer may be out of date"%lag
+    if lag>4:
+        note+=". WARNING: newest official Nasdaq-100 observation is %d days old"%lag
     return note+"."
 
 # ---- Hourly learning: save QQQ hourly bars from Alpaca, learn each hour's typical move, and test whether hourly data improves the networks ----
@@ -1803,42 +1845,96 @@ def refresh_prices_background():
         threading.Thread(target=refresh_prices,args=(True,),daemon=True).start()
     # else: a refresh is already in flight (this request or the background loop) - don't pile on, just use what's on disk right now.
 
+def chart_quantitative_intelligence(dates, closes):
+    """Transparent daily-return diagnostics; unavailable methods remain explicitly unavailable."""
+    returns=[]
+    for a,b in zip(closes[:-1],closes[1:]):
+        if a>0 and b>0:
+            r=math.log(b/a)
+            if math.isfinite(r): returns.append(r)
+    if len(returns)<30:
+        return {"available":False,"reason":"At least 30 valid daily log returns are required.",
+                "as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),
+                "bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},
+                "derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None}}
+    n=len(returns); mu=sum(returns)/n
+    var=sum((x-mu)**2 for x in returns)/(n-1)
+    obs_var=max(var,1e-12)
+    # Normal prior N(0, 1%²) and Normal likelihood with sample variance.
+    prior_var=0.01**2
+    post_var=1.0/(1.0/prior_var+n/obs_var)
+    post_mean=post_var*(n*mu/obs_var)
+    z=post_mean/math.sqrt(post_var)
+    p_positive=0.5*(1.0+math.erf(z/math.sqrt(2.0)))
+    # Scalar Kalman filter for latent mean daily return.
+    q=max(obs_var*0.01,1e-12); state=0.0; state_var=prior_var
+    for obs in returns:
+        state_var+=q; gain=state_var/(state_var+obs_var)
+        state+=gain*(obs-state); state_var=(1.0-gain)*state_var
+    # Fixed-parameter GARCH(1,1) baseline; explicitly not an estimated fit.
+    alpha,beta=0.05,0.90; omega=(1.0-alpha-beta)*obs_var
+    h=max(obs_var,1e-12)
+    for r in returns: h=omega+alpha*(r-mu)**2+beta*h
+    first=returns[-1]-returns[-2] if n>=2 else None
+    second=returns[-1]-2*returns[-2]+returns[-3] if n>=3 else None
+    return {"available":True,"as_of_date":dates[-1],"as_of_returns":n,
+        "bayesian_drift":{"probability_positive":p_positive,"posterior_mean_pct":post_mean*100,
+            "posterior_sd_pct":math.sqrt(post_var)*100,"prior":"Normal(0, 1% per session)"},
+        "kalman":{"trend_pct_per_session":state*100,"process_variance":q,"observation_variance":obs_var},
+        "garch":{"next_volatility_pct":math.sqrt(max(h,0))*100,"persistence":alpha+beta,
+            "alpha":alpha,"beta":beta,"omega":omega,"fit":"Fixed-coefficient GARCH(1,1) baseline; not maximum-likelihood fitted"},
+        "hmm":{"high_volatility_probability_next":None,"fit_rows":0,
+            "status":"Not fitted; no HMM probability is reported."},
+        "derivative_features":{"first_difference_daily_log_return":first,
+            "second_difference_change_in_daily_log_return":second},
+        "optimization":{"solver":"Not run: no validated directional objective is fitted","curvature":None}}
+
 def chart_fast_verdict(dates, closes, brain):
-    """Cheap, side-effect-free chart verdict. Never refreshes remote data, runs Monte Carlo, or retunes trend rules."""
-    h, label, defaulted = parse_horizon("next month")
-    rule = DEFAULT_RULE
+    """Separate downside-risk alarm from trend direction; never relabel risk as BUY/SELL."""
+    h,label,defaulted=parse_horizon("next month")
+    rule=DEFAULT_RULE
     try:
-        champion = json.loads((LEARN_DIR / "champion.json").read_text(encoding="utf-8"))
-        n0, b0 = int(champion.get("n", DEFAULT_RULE[0])), float(champion.get("band", DEFAULT_RULE[1]))
-        if n0 >= 2 and 0 <= b0 <= 0.10: rule = (n0, b0)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        pass
-    n, band = rule
-    pos = trend_positions(closes, n, band)
-    trend = "BUY" if pos[-1] == 1 else "SELL"
-    base = {"as_of": dates[-1], "horizon_days": h, "horizon_label": label,
-            "horizon_defaulted": defaulted, "trend_verdict": trend,
-            "trend_rule": {"average_days": n, "band_pct": band * 100},
-            "brain_job": dict(BRAIN_JOB), "risk_horizon_days": BRAIN_HORIZON}
+        champion=json.loads((LEARN_DIR/"champion.json").read_text(encoding="utf-8"))
+        n0,b0=int(champion.get("n",DEFAULT_RULE[0])),float(champion.get("band",DEFAULT_RULE[1]))
+        if n0>=2 and 0<=b0<=0.10: rule=(n0,b0)
+    except (OSError,ValueError,TypeError,json.JSONDecodeError): pass
+    n,band=rule; positions=trend_positions(closes,n,band)
+    trend="BUY" if positions and positions[-1]==1 else ("SELL" if positions and positions[-1]==0 else None)
+    base={"as_of":dates[-1],"horizon_days":h,"horizon_label":label,
+        "horizon_defaulted":defaulted,"trend_verdict":trend,
+        "trend_rule":{"average_days":n,"band_pct":band*100},
+        "brain_job":dict(BRAIN_JOB),"risk_horizon_days":BRAIN_HORIZON,
+        "fusion":{"available":False,"reason":"No validated directional probability ensemble is present in this backend."}}
     if brain is None:
-        base.update({"verdict": "HOLD", "confidence": "Low", "interim": True,
-                     "decision_status": "BRAIN_UNAVAILABLE",
-                     "decision_reason": "No trained neural risk model is available.", "agree": False})
+        base.update({"verdict":"HOLD","confidence":"Low","interim":True,
+            "decision_status":"BRAIN_UNAVAILABLE",
+            "decision_reason":"The downside-risk model is unavailable; direction will not be inferred from a missing risk score.",
+            "risk_score":None,"alarm_level":None,"risk_alarm_active":None,"agree":False})
         return base
     try:
-        risk = brain_risk_now(brain, dates, closes)
-        threshold = float(brain["threshold"])
-        neural = "SELL" if risk >= threshold else "BUY"
-        decision = reconcile_signals(neural, trend, h)
-        base.update({"verdict": decision["verdict"], "confidence": "Low",
-                     "interim": False, "risk_score": risk, "alarm_level": threshold,
-                     "brain_verdict": neural, "agree": decision["agree"],
-                     "decision_status": decision["status"],
-                     "decision_reason": decision["reason"]})
+        risk=float(brain_risk_now(brain,dates,closes)); threshold=float(brain["threshold"])
+        alarm=risk>=threshold
+        if h>63:
+            verdict="HOLD"; status="HORIZON_UNSUPPORTED"
+            reason="The requested horizon exceeds 63 sessions; no validated timing rule is available."
+        elif alarm:
+            verdict="HOLD"; status="DOWNSIDE_RISK_ALARM"
+            reason="The 21-session downside-risk model triggered its 8% drawdown alarm. This is a risk warning, not a SELL prediction."
+        elif trend is None:
+            verdict="HOLD"; status="INSUFFICIENT_TREND_HISTORY"
+            reason="The trend rule does not yet have enough history for a directional signal."
+        else:
+            verdict=trend; status="TREND_ONLY_NO_RISK_ALARM"
+            reason="No downside-risk alarm is active. Direction comes only from the Nasdaq-100 trend rule; no calibrated probability of a rise is available."
+        base.update({"verdict":verdict,"confidence":"Low","interim":False,
+            "risk_score":risk,"alarm_level":threshold,"risk_alarm_active":alarm,
+            "brain_verdict":"RISK_ALARM" if alarm else "NO_RISK_ALARM",
+            "agree":None,"decision_status":status,"decision_reason":reason})
     except Exception as exc:
-        base.update({"verdict": "HOLD", "confidence": "Low", "interim": True,
-                     "decision_status": "INFERENCE_ERROR",
-                     "decision_reason": "Live inference unavailable: " + str(exc)[:100], "agree": False})
+        base.update({"verdict":"HOLD","confidence":"Low","interim":True,
+            "decision_status":"INFERENCE_ERROR",
+            "decision_reason":"Live risk inference unavailable: "+str(exc)[:100],
+            "risk_score":None,"alarm_level":None,"risk_alarm_active":None,"agree":False})
     return base
 
 def refresh_market_snapshot_background():
@@ -1853,29 +1949,47 @@ def refresh_market_snapshot_background():
     threading.Thread(target=_worker, daemon=True, name="mira-alpaca-snapshot").start()
 
 def chart_payload(days=180):
-    days=min((30,90,180,365,500),key=lambda k:abs(k-int(days))); now=time.time()
-    if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<60):
-        # Refresh FRED/Alpaca asynchronously. The chart request only uses the last saved local snapshot.
+    days=min((30,90,180,365,500),key=lambda k:abs(k-int(days)))
+    now=time.time()
+    if not (CHART_CACHE["data"] and CHART_CACHE["days"]==days and now-CHART_CACHE["at"]<30):
         refresh_prices_background()
-        dates,closes=load_price_series(); brain=brain_load(); candles=chart_daily_candles(); win=dates[-days:]
-        data={"as_of":dates[-1],"days":days,"dates":win,"closes":[round(c,2) for c in closes[-days:]],"candles":[{"d":d,"o":candles[d][0],"h":candles[d][1],"l":candles[d][2],"c":candles[d][3]} for d in win if d in candles],"data_note":price_data_note(),"live_record":chart_live_record()}
+        ndx_dates,ndx_closes=load_price_series()
+        brain=brain_load()
+        qqq_daily=chart_daily_candles()
+        qqq_dates=sorted(qqq_daily)[-days:]
+        qqq_candles=[{"d":d,"o":round(qqq_daily[d][0],4),"h":round(qqq_daily[d][1],4),
+            "l":round(qqq_daily[d][2],4),"c":round(qqq_daily[d][3],4)} for d in qqq_dates]
         if brain is not None and brain.get("eval"):
-            data["replay"]=chart_replay(dates,closes,brain,days); data["scoreboard"]=chart_scoreboard(brain)
-        else: data["replay"]=[]; data["scoreboard"]={"available":False}
-        try: data["verdict"]=chart_fast_verdict(dates,closes,brain)
-        except Exception as exc: data["verdict"]={"error":str(exc)[:120]}
+            research_replay=chart_replay(ndx_dates,ndx_closes,brain,days)
+            scoreboard=chart_scoreboard(brain)
+        else:
+            research_replay=[]; scoreboard={"available":False}
+        try: verdict=chart_fast_verdict(ndx_dates,ndx_closes,brain)
+        except Exception as exc: verdict={"error":str(exc)[:120]}
+        data={"as_of":ndx_dates[-1],"days":days,
+            "dates":qqq_dates,"closes":[c["c"] for c in qqq_candles],"candles":qqq_candles,
+            "chart_instrument":"QQQ","chart_source":"Alpaca IEX hourly bars aggregated into daily OHLC",
+            "research_instrument":"NASDAQ100","research_dates":ndx_dates[-days:],
+            "research_closes":[round(c,2) for c in ndx_closes[-days:]],
+            "research_replay":research_replay,"replay":[],
+            "scoreboard":scoreboard,"verdict":verdict,
+            "quantitative_intelligence":chart_quantitative_intelligence(ndx_dates,ndx_closes),
+            "data_note":price_data_note(),"live_record":chart_live_record()}
         CHART_CACHE.update({"at":now,"days":days,"data":data})
     out=dict(CHART_CACHE["data"])
-    # Never block /api/chart on a live Alpaca network request. Return the last
-    # cached quote immediately and refresh it independently in the background.
-    cached = MARKET_CACHE.get("data")
-    out["live"] = cached if cached is not None else {
-        "connected": False, "configured": bool(MARKET_API_KEY and MARKET_API_SECRET),
-        "provider": "Alpaca Basic", "symbol": "QQQ",
-        "error": "Waiting for the first background market-data snapshot."
-    }
-    if cached is None or time.time() - MARKET_CACHE.get("at", 0.0) > 3:
+    cached=MARKET_CACHE.get("data")
+    out["live"]=cached if cached is not None else {
+        "connected":False,"configured":bool(MARKET_API_KEY and MARKET_API_SECRET),
+        "provider":"Alpaca Basic","symbol":"QQQ",
+        "error":"Waiting for the first background market-data snapshot."}
+    if cached is None or time.time()-MARKET_CACHE.get("at",0.0)>3:
         refresh_market_snapshot_background()
+    minute=MINUTE_CACHE.get("bars") or []
+    if time.time()-MINUTE_CACHE.get("at",0.0)>15:
+        refresh_minute_bars_background()
+    out["intraday_candles"]=minute
+    out["intraday_status"]={"status":MINUTE_CACHE.get("status"),"bars":len(minute),
+        "source":"Alpaca IEX 1-minute QQQ bars","error":MINUTE_CACHE.get("error")}
     return out
 
 CHAT_RATE={}
