@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MIRA Live Market View</title>
 <style>
-:root{--bg:#0a1019;--panel:#111a2a;--line:#1f2d44;--text:#e6edf6;--muted:#8da2bb;--up:#2dd4bf;--down:#f87171;--warn:#fbbf24;--grey:#475569}
+:root{color-scheme:dark;--bg:#070b12;--panel:#0d1522;--line:#1c2a3b;--text:#e6edf7;--muted:#8292a6;--up:#26d7c0;--down:#ff6678;--warn:#f5bf42;--grey:#475569}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--line)}
@@ -14,7 +14,7 @@ h1 span{color:var(--muted);font-weight:400}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .chip.ok{color:var(--up);border-color:#1d5b55}.chip.bad{color:var(--down);border-color:#6b2b2b}
-main{max-width:1180px;margin:0 auto;padding:16px 20px 40px}
+main{max-width:1320px;margin:0 auto;padding:16px 20px 40px}.assetbar{display:flex;flex-wrap:wrap;align-items:end;gap:10px;margin:0 0 12px;padding:12px 14px;background:#0b1421;border:1px solid var(--line);border-radius:10px}.assetbar label{display:grid;gap:4px;color:var(--muted);font-size:11px}.assetbar select,.assetbar input{background:#101c2b;color:var(--text);border:1px solid #2a3a50;border-radius:7px;padding:8px 10px;min-width:145px}.assetbar input{min-width:190px}.assetbar .assetnote{font-size:11px;color:var(--muted);flex:1;min-width:220px}
 .top{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:14px}
 @media(max-width:820px){.top{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
@@ -46,8 +46,10 @@ canvas{display:block;width:100%}
 .layerinfo{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.layerinfo span{font-size:11px;color:var(--muted);background:#0c1422;border:1px solid var(--line);border-radius:7px;padding:6px 8px}.note{color:var(--muted);font-size:12.5px;margin:14px 2px 0}
 .note b{color:var(--text)}
 .msg{color:var(--warn);font-size:13px;margin:8px 0 0}
+
+.mira-intel{margin:18px 0 8px;padding:18px;background:linear-gradient(145deg,#0b1420,#080e17);border:1px solid #243449;border-radius:14px;color:#e6edf7}.mira-intel *{box-sizing:border-box}.mira-intel-head{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:14px}.mira-intel-head h2{margin:3px 0;font-size:19px}.mira-intel-head p,.mi-note{color:#8da0b5;font-size:11px}.mira-kicker{font-size:9px;letter-spacing:.18em;color:#35d6c0;font-weight:700}.mi-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.mi-card{min-width:0;padding:14px;background:#0d1725;border:1px solid #203147;border-radius:10px}.mi-wide{grid-column:1/-1}.mi-card h3{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#9eb0c4;margin:0 0 11px}.mi-card h4{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#8da0b5;margin:10px 0 6px}.mi-card label{display:grid;gap:4px;color:#9aabc0;font-size:10px;margin:8px 0}.mi-card input,.mi-card textarea{width:100%;background:#080f19;color:#e6edf7;border:1px solid #2a3b52;border-radius:7px;padding:8px;font:12px system-ui}.mi-card textarea{resize:vertical}.mi-controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}.mi-card button,.mira-intel-head button{background:#12342f;border:1px solid #28675f;color:#6ce3d1;border-radius:7px;padding:8px 11px;font-size:11px;cursor:pointer}.mi-card button:disabled{opacity:.45;cursor:wait}.mi-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:7px;margin-top:10px}.mi-stat{padding:9px;background:#09111c;border:1px solid #1d2c40;border-radius:7px;min-width:0}.mi-stat b{display:block;font-size:17px;overflow-wrap:anywhere}.mi-stat span{font-size:9px;color:#8da0b5}.mi-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}.mi-list{display:grid;gap:7px;font-size:11px;color:#c1ccda;overflow-wrap:anywhere}.mi-item{padding:8px;background:#09111b;border:1px solid #1d2b3d;border-radius:7px}.mi-item a{color:#6ed9cf;text-decoration:none}.mi-item small{display:block;color:#8295aa;margin-top:3px}.mi-good{color:#63dfbd}.mi-warn{color:#f1c16b}.mi-error{color:#ff8791}@media(max-width:760px){.mi-grid,.mi-columns{grid-template-columns:1fr}.mi-wide{grid-column:auto}.mira-intel-head{align-items:flex-start;flex-direction:column}}
 </style>
-</head>
+<style>.mira-learning{margin:12px 0;padding:13px 15px;background:linear-gradient(135deg,#0c1b25,#0b121d);border:1px solid #24504d;border-radius:11px;color:var(--txt,#e6edf7)}.mira-learning-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.mira-learning-head b{display:block;font-size:10px;letter-spacing:.14em;color:var(--teal,#26d7c0)}.mira-learning-head small,.mira-learning p,.mira-learning-sources{font-size:10px;color:var(--muted,#8292a6)}.mira-learning-head span{font-size:9px;border:1px solid #345a55;border-radius:20px;padding:4px 8px;color:var(--teal,#26d7c0)}.mira-learning-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0}.mira-learning-stats div{padding:8px;background:#080f18;border:1px solid #1c2b3e;border-radius:7px}.mira-learning-stats b{display:block;font-size:16px}.mira-learning-stats small{font-size:9px;color:var(--muted,#8292a6)}.mira-learning-sources{display:flex;gap:6px;flex-wrap:wrap}.mira-learning-sources span{padding:4px 7px;border:1px solid #263549;border-radius:6px}.mira-learning p{margin:8px 0 0}@media(max-width:600px){.mira-learning-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}</style></head>
 <body>
 <header>
   <h1>MIRA <span>/ Live market view</span></h1>
@@ -58,6 +60,7 @@ canvas{display:block;width:100%}
   </div>
 </header>
 <main>
+<section class="mira-learning" id="miraLearning"><div class="mira-learning-head"><div><b>MIRA AUTONOMOUS LEARNING</b><small>Continuous evidence ingestion · delayed outcome grading · governed model updates</small></div><span id="mlState">CONNECTING</span></div><div class="mira-learning-stats"><div><b id="mlEvents">—</b><small>Evidence events stored</small></div><div><b id="mlGraded">—</b><small>Forecasts graded</small></div><div><b id="mlPending">—</b><small>Forecasts awaiting outcomes</small></div><div><b id="mlTrained">—</b><small>Model trained through</small></div></div><div id="mlSources" class="mira-learning-sources">Waiting for ingestion status…</div><p id="mlPolicy">New observations are retained; model updates require matured labels and chronological validation.</p></section>
   <section class="top">
     <div class="card" id="verdictCard"><h2>Model's view right now</h2><div class="sub">Loading…</div></div>
     <div class="card" id="scoreCard"><h2>How often is it right? (days it never saw)</h2><div class="sub">Loading…</div></div>
@@ -71,6 +74,12 @@ canvas{display:block;width:100%}
     <details style="margin-top:10px"><summary class="sub">Calculation methods and equations</summary><div class="layerinfo"><span>Log return: rₜ = ln(Pₜ / Pₜ₋₁)</span><span>Bayesian: Normal prior + Normal likelihood → posterior P(μ &gt; 0)</span><span>Kalman: state prediction → innovation → gain-weighted update</span><span>GARCH: σ²ₜ₊₁ = ω + αε²ₜ + βσ²ₜ</span><span>HMM: Baum–Welch EM + forward state filter</span><span>Logistic: AD gradient + exact Hessian → damped Newton step</span></div></details>
   </section>
 
+  <div class="assetbar" aria-label="Select market instrument">
+    <label>Instrument class<select id="assetClass"><option value="equity" selected>Stocks &amp; ETFs</option><option value="index">Indices</option></select></label>
+    <label>Search<input id="assetSearch" type="search" placeholder="Search ticker or company"></label>
+    <label>Market instrument<select id="assetSelect"><option value="QQQ">QQQ · Nasdaq-100 ETF</option></select></label>
+    <span class="assetnote" id="assetNote">QQQ market data is separate from the Nasdaq-100 research model.</span>
+  </div>
   <section class="card chartcard">
     <div class="ctrl">
       <div class="legend" id="legend"></div>
@@ -89,7 +98,17 @@ canvas{display:block;width:100%}
     <div class="msg" id="chartMsg"></div>
   </section>
 
-  <p class="note"><b>How to read this.</b> The price chart shows QQQ ETF candles from Alpaca IEX data. The research model is trained on official Nasdaq-100 daily closes, not QQQ. Its neural component estimates the chance of an 8%+ drawdown over 21 sessions; it does not predict price direction. When its risk alarm is active, MIRA reports HOLD. When no risk alarm is active, the separate trend rule may report BUY or SELL; no calibrated probability of a price rise is claimed. Historical Nasdaq-100 risk evaluations are kept separate from the QQQ price chart. Research output, not financial advice.</p>
+  <p class="note" id="assetDisclaimer"><b>How to read this.</b> Market prices and research-model outputs are kept instrument-specific. MIRA's current neural risk model is trained on Nasdaq-100 daily history only; it is not reused for other stocks or ETFs. Other instruments receive price and statistical diagnostics until a symbol-specific model has completed chronological training, calibration and untouched holdout evaluation. Research output, not financial advice.</p>
+
+<section class="mira-intel" id="mira-intelligence">
+ <div class="mira-intel-head"><div><div class="mira-kicker">MIRA RESEARCH WORKSPACE</div><h2>Evidence · Portfolio · Thesis · Governance</h2><p>Source-linked research and auditable quantitative workflows. Missing provider data is shown as unavailable, never inferred.</p></div><button type="button" id="miRefresh">Refresh workspace</button></div>
+ <div class="mi-grid">
+  <article class="mi-card mi-wide"><h3>Company intelligence</h3><div class="mi-note">SEC filings and reported financial facts are not analyst estimates. News and filings retain their source links and timestamps.</div><div class="mi-controls"><input id="miSymbol" maxlength="12" placeholder="Ticker · e.g. AAPL"><button type="button" id="miResearch">Research company</button><button type="button" id="miTrain">Train symbol risk model</button></div><div class="mi-note" id="miResearchStatus">SEC company facts and filings require MIRA_SEC_USER_AGENT. News requires FINNHUB_API_KEY. Analyst estimates are not supplied unless a licensed provider is connected.</div><div class="mi-metrics" id="miMetrics"></div><div class="mi-columns"><div><h4>Recent filings</h4><div id="miFilings" class="mi-list">No research loaded.</div></div><div><h4>News &amp; macro context</h4><div id="miNews" class="mi-list">No research loaded.</div></div></div></article>
+  <article class="mi-card"><h3>Investment thesis monitor</h3><div class="mi-note">Background evidence refresh runs approximately every six hours when SEC/Finnhub providers are configured. Evidence collection is automated; thesis interpretation remains human-reviewed.</div><label>Company ticker<input id="miThesisSymbol" maxlength="12" placeholder="AAPL"></label><label>Thesis title<input id="miThesisTitle" maxlength="180" placeholder="Why this company may compound"></label><label>Investment thesis<textarea id="miThesisText" rows="3" maxlength="4000" placeholder="State the hypothesis and time horizon."></textarea></label><label>Key assumptions · one per line<textarea id="miAssumptions" rows="3" placeholder="Revenue growth remains durable"></textarea></label><label>Invalidation conditions · one per line<textarea id="miInvalidation" rows="2" placeholder="Two consecutive quarters of margin deterioration"></textarea></label><button type="button" id="miSaveThesis">Save thesis</button><div id="miThesisList" class="mi-list"></div><div id="miThesisEvidence" class="mi-note"></div></article>
+  <article class="mi-card"><h3>Portfolio risk laboratory</h3><label>Holdings · one per line: TICKER, quantity<textarea id="miHoldings" rows="5" placeholder="AAPL, 10&#10;MSFT, 5&#10;QQQ, 2"></textarea></label><div class="mi-controls"><button type="button" id="miSavePortfolio">Save holdings</button><button type="button" id="miAnalyzePortfolio">Calculate risk</button></div><div id="miPortfolio" class="mi-list">No portfolio analysis loaded.</div></article>
+  <article class="mi-card mi-wide"><h3>Model governance &amp; validation ledger</h3><div class="mi-controls"><button type="button" id="miGovernance">Refresh validation record</button></div><div id="miGovernanceView" class="mi-metrics"><div class="mi-stat"><b>—</b><span>Predictions graded</span></div></div><p class="mi-note">Live outcomes are graded only after the full prediction horizon has elapsed. AUC, Brier score and log loss are not reported until enough observations exist.</p></article>
+ </div>
+</section>
 </main>
 
 <script>
@@ -97,48 +116,50 @@ const $=id=>document.getElementById(id);
 const STATIC=!!window.MIRA_STATIC;
 const UP=getComputedStyle(document.documentElement).getPropertyValue('--up').trim()||'#2dd4bf';
 const DOWN='#f87171',GREY='#475569',WARN='#fbbf24',MUTED='#8da2bb',LINE='#1f2d44';
-let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1;
+let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1,selectedAsset=null,assetUniverse={indices:[],equities:[]},loadBusy=false;
 const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
 const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
-function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM: '+(hm.status||'not fitted')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='No validated directional probability ensemble is present. Bayesian and Kalman diagnostics plus a fixed-coefficient GARCH baseline are shown as statistical context; HMM is unavailable until fitted and validated.'}}
+function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM: '+(hm.status||'not fitted')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='No validated directional probability ensemble is present. Bayesian P(positive drift) describes the posterior sign of the historical mean return, not the next-session direction. GARCH is a constrained Gaussian maximum-likelihood fit; HMM is a fitted two-state Gaussian volatility regime model. Neither is an automatic BUY/SELL vote.'}}
 
 async function load(){
+  if(loadBusy)return;loadBusy=true;
   try{
-    const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):('/api/chart?days='+$('range').value),{cache:'no-store'});
+    const endpoint=selectedAsset?('/api/asset-chart?symbol='+encodeURIComponent(selectedAsset.symbol)+'&type='+selectedAsset.type+'&days='+$('range').value):('/api/chart?days='+$('range').value); const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):endpoint,{cache:'no-store'});
     const j=await r.json();
     if(j.error){throw new Error(j.error)}
     if(STATIC){const n=+$('range').value,k=Math.max(0,j.dates.length-n),first=j.dates[k];j.dates=j.dates.slice(k);j.closes=j.closes.slice(k);j.candles=(j.candles||[]).filter(c=>c.d>=first);j.replay=(j.replay||[]).filter(m=>m.d>=first)}
-    data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok';
+    data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok'; if(selectedAsset){$('assetNote').textContent=(j.model_scope||'No validated model for this instrument')+' · '+(j.chart_source||'');$('assetDisclaimer').innerHTML='<b>Model scope.</b> '+(j.model_scope||'No validated neural forecast for this instrument')+'. MIRA will not transfer Nasdaq-100 model weights to another ticker. Historical price statistics are not a prediction.';}
     absorbLive(); renderCards(); draw(); drawTick();
   }catch(e){
-    $('chipServer').textContent='Server not reachable'; $('chipServer').className='chip bad';
-  }
+    $('chartMsg').textContent='Chart request unavailable: '+(e&&e.message?e.message:'request failed');
+  }finally{loadBusy=false;}
 }
 
 function absorbLive(){
   const L=data.live||{};
-  if(L.connected&&L.last!=null){
+  if(selectedAsset&&selectedAsset.type==='index'){$('chipLive').textContent='INDEX DAILY CLOSES · NOT REAL-TIME';$('chipLive').className='chip';}
+  else if(L.connected&&L.last!=null){
     const t=Date.now(); const last=liveBuf[liveBuf.length-1];
     if(!last||last.p!==Number(L.last)||t-last.t>20000) liveBuf.push({t,p:Number(L.last)});
     if(liveBuf.length>240) liveBuf.shift();
-    $('chipLive').textContent='QQQ '+fmt(L.last)+(L.day_change_pct!=null?'  '+(L.day_change_pct>=0?'+':'')+(L.day_change_pct*100).toFixed(2)+'%':'')+' · '+(L.session||'')+(L.streaming?' · WS':'');
+    $('chipLive').textContent=(data.chart_instrument||'QQQ')+' '+fmt(L.last)+(L.day_change_pct!=null?'  '+(L.day_change_pct>=0?'+':'')+(L.day_change_pct*100).toFixed(2)+'%':'')+' · '+(L.session||'')+(L.streaming?' · WS':'');
     $('chipLive').className='chip ok';
   }else{
     $('chipLive').textContent='Live price off · connect Alpaca keys'; $('chipLive').className='chip';
   }
   const qqqDate=(data.dates||[]).slice(-1)[0];
-  $('chipData').textContent='QQQ candles through '+(qqqDate||'not available')+' · NDX research through '+(data.as_of||'—');
+  $('chipData').textContent=(data.chart_instrument||'QQQ')+' closes through '+(qqqDate||'not available')+' · '+(data.research_instrument||'selected research')+' through '+(data.as_of||'—');
 }
 
 function renderCards(){
   const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{}, f=v.fusion||{};
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pp=x=>x==null||!Number.isFinite(Number(x))?'Not available':(Number(x)*100).toFixed(1)+'%';
-  let h='<h2>Risk-aware market decision · Nasdaq-100 research</h2>';
+  let h='<h2>Research decision · '+esc(data.research_instrument||data.chart_instrument||'Nasdaq-100')+'</h2>';
   if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
   else{
-    const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);
+    const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED','SYMBOL_MODEL_NOT_TRAINED'].includes(v.decision_status);
     const verdict=unavailable?'NO VALIDATED CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL');
     const cls=verdict==='BUY'?'buy':verdict==='SELL'?'sell':'hold', icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
     const risk=Number(v.risk_score), alarm=Number(v.alarm_level);
@@ -200,10 +221,12 @@ function setup(cv){const r=cv.getBoundingClientRect();cv.width=Math.round(r.widt
 function series(){
   const d=data, liveMode=$('chartMode').value==='1m';
   const minute=(d.intraday_candles||[]).slice();
+  const closeOnly=!liveMode&&(!d.candles||!d.candles.length);
   const dates=liveMode?minute.map(c=>c.t):d.dates.slice();
-  const sourceCandles=liveMode?minute.map(c=>({d:c.t,o:c.o,h:c.h,l:c.l,c:c.c,live:true})):d.candles;
-  const hasC=sourceCandles&&sourceCandles.length>0;
+  const sourceCandles=liveMode?minute.map(c=>({d:c.t,o:c.o,h:c.h,l:c.l,c:c.c,live:true})):(d.candles||[]);
+  const hasC=liveMode?sourceCandles.length>0:(sourceCandles.length>0||((d.closes||[]).length>1));
   const cmap={}; (sourceCandles||[]).forEach(c=>cmap[c.d]=Object.assign({},c));
+  if(closeOnly)(d.closes||[]).forEach((v,i)=>{if(dates[i]!=null&&Number.isFinite(Number(v)))cmap[dates[i]]={d:dates[i],o:Number(v),h:Number(v),l:Number(v),c:Number(v),closeOnly:true};});
   const L=d.live||{};
   const lastC=(d.candles||[]).slice(-1)[0];
   if(!liveMode&&hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<0.25){
@@ -214,14 +237,14 @@ function series(){
   }
   const idx={}; dates.forEach((x,i)=>idx[x]=i);
   const calls={}; if(!liveMode)(d.replay||[]).forEach(m=>calls[m.d]=m);
-  return {dates,cmap,idx,calls,hasC,liveMode};
+  return {dates,cmap,idx,calls,hasC,liveMode,closeOnly};
 }
 
 function draw(){
   if(!data) return;
   const cv=$('chart'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
   const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=0, gap=10;
-  if(!N||!S.hasC){x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(S.liveMode?'No Alpaca minute bars are available. Connect Alpaca keys and check that the US market is open.':'No QQQ daily candles are available. Connect Alpaca keys and collect hourly history.',w/2,h/2);$('chartMsg').textContent=S.liveMode?'Live 1-minute candles require authenticated Alpaca IEX bars. No synthetic candles are shown.':'QQQ daily OHLC is unavailable; Nasdaq-100 closes are not substituted.';return}
+  if(!N||!S.hasC){x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(S.liveMode?'No Alpaca minute bars are available. Connect Alpaca keys and check that the US market is open.':'No daily market history is available for this instrument.',w/2,h/2);$('chartMsg').textContent=S.liveMode?'Live 1-minute candles require authenticated Alpaca IEX bars. No synthetic candles are shown.':'No daily history is available; values from another instrument are never substituted.';return}
   const plotW=w-padL-padR-fz, plotH=h-top-axisH-stripH-gap, step=plotW/N;
   const X=i=>padL+(i+.5)*step;
   let lo=Infinity,hi=-Infinity;
@@ -233,7 +256,11 @@ function draw(){
   x.font='11px system-ui';x.textBaseline='middle';
   for(let k=0;k<=4;k++){const v=lo+(hi-lo)*k/4,yy=Y(v);x.strokeStyle=LINE;x.lineWidth=1;x.beginPath();x.moveTo(padL,yy);x.lineTo(padL+plotW,yy);x.stroke();x.fillStyle=MUTED;x.textAlign='left';x.fillText(fmt(v,0),padL+4,yy-7)}
   // price
-  if(S.hasC){
+  if(S.closeOnly){
+    x.strokeStyle=BLUE;x.lineWidth=1.8;x.beginPath();let started=false;
+    S.dates.forEach((dd,i)=>{const c=S.cmap[dd];if(!c)return;const xx=X(i),yy=Y(c.c);if(!started){x.moveTo(xx,yy);started=true}else x.lineTo(xx,yy)});
+    x.stroke();
+  }else if(S.hasC){
     S.dates.forEach((dd,i)=>{const c=S.cmap[dd];if(!c)return;const up=c.c>=c.o,col=up?UP:DOWN,xx=X(i);
       x.strokeStyle=col;x.lineWidth=1;x.beginPath();x.moveTo(xx,Y(c.h));x.lineTo(xx,Y(c.l));x.stroke();
       const bw=Math.max(1.5,step*.62),y1=Y(Math.max(c.o,c.c)),y2=Y(Math.min(c.o,c.c));
@@ -247,10 +274,10 @@ function draw(){
   // forecast zone
   const fx=padL+plotW+ (fz>0?6:0), v=data.verdict||{};
   x.textBaseline='middle';
-  if(!v.error&&!v.interim&&v.verdict){const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED'].includes(v.decision_status);const verdict=unavailable?'NO CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL'),col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
+  if(!v.error&&!v.interim&&v.verdict){const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED','SYMBOL_MODEL_NOT_TRAINED'].includes(v.decision_status);const verdict=unavailable?'NO CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL'),col=verdict==='BUY'?UP:(verdict==='SELL'?DOWN:WARN),cx=padL+plotW+fz/2-10,cy=top+plotH*.4;
     x.fillStyle=col+'18';x.fillRect(padL+plotW+4,top,fz-8,plotH);
     x.fillStyle=col;x.font='38px system-ui';x.textAlign='center';x.fillText(verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■'),cx,cy);
-    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';x.fillText('NDX risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('Trend '+(v.trend_verdict||'—'),cx,cy+66)}
+    x.font='600 13px system-ui';x.fillText(verdict,cx,cy+34);x.fillStyle=MUTED;x.font='11px system-ui';if(v.decision_status==='SYMBOL_MODEL_NOT_TRAINED'){x.fillText('No symbol model',cx,cy+52);x.fillText(String(data.chart_instrument||'').slice(0,13),cx,cy+66)}else{x.fillText((data.research_instrument||data.chart_instrument||'NDX')+' risk '+pct(v.risk_score,0),cx,cy+52);x.fillText('Trend '+(v.trend_verdict||'—'),cx,cy+66)}}
   else{x.fillStyle=MUTED;x.textAlign='center';x.font='11px system-ui';x.fillText('NDX research',padL+plotW+fz/2-10,top+plotH*.4)}
   // hover line
   if(hover>=0&&hover<N){x.strokeStyle='#8da2bb66';x.lineWidth=1;x.setLineDash([3,3]);x.beginPath();x.moveTo(X(hover),top);x.lineTo(X(hover),top+plotH+gap+stripH);x.stroke();x.setLineDash([])}
@@ -258,7 +285,7 @@ function draw(){
 
 function drawTick(){
   const cv=$('tick'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
-  x.fillStyle=MUTED;x.font='11px system-ui';x.textBaseline='top';x.textAlign='left';x.fillText(STATIC?'LIVE PRICE (QQQ) · static page: refreshed by GitHub about every 30 minutes':'LIVE PRICE (QQQ) · updates every 10 seconds',8,4);
+  x.fillStyle=MUTED;x.font='11px system-ui';x.textBaseline='top';x.textAlign='left';x.fillText(STATIC?'LIVE PRICE ('+(data&&data.chart_instrument||'QQQ')+') · static page refresh':'LIVE PRICE ('+(data&&data.chart_instrument||'QQQ')+') · provider refresh',8,4);
   if(liveBuf.length<2){x.fillStyle=MUTED;x.textBaseline='middle';x.textAlign='center';x.fillText(liveBuf.length?'Waiting for the next price…':'Connect your Alpaca keys to see the live price move here.',w/2,h/2+8);return}
   const ps=liveBuf.map(b=>b.p),lo=Math.min(...ps),hi=Math.max(...ps),pad=(hi-lo)*.2||.05,t0=liveBuf[0].t,t1=liveBuf[liveBuf.length-1].t||1;
   const X=t=>12+(t-t0)/Math.max(1,t1-t0)*(w-110),Y=p=>22+(hi+pad-p)/(hi-lo+2*pad)*(h-34);
@@ -273,14 +300,68 @@ $('chart').addEventListener('mousemove',e=>{
   if(!geo||!data)return;const r=$('chart').getBoundingClientRect(),mx=e.clientX-r.left,i=Math.round((mx-geo.padL)/geo.step-.5);
   if(i<0||i>=geo.N){hover=-1;$('tip').style.display='none';draw();return}
   hover=i;const dd=geo.S.dates[i],c=geo.S.cmap[dd],m=geo.S.calls[dd],close=(c&&c.c)??null;
-  let t='<b>'+dd+'</b><br>'+(c?'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c) : 'QQQ candle unavailable');
+  let t='<b>'+dd+'</b><br>'+(c?(c.closeOnly?'Close '+fmt(c.c):'Open '+fmt(c.o)+' · High '+fmt(c.h)+'<br>Low '+fmt(c.l)+' · Close '+fmt(c.c)):((data&&data.chart_instrument)||'Instrument')+' candle unavailable');
   if(m){const alert=m.risk_alert??(m.v==='SELL');t+='<br><span style="color:'+(alert?DOWN:UP)+'"><b>Risk model: '+(alert?'ALERT':'NO ALERT')+'</b></span> · drawdown risk '+pct(m.p,0)+'<br>'+(m.o==null?'<span style="color:#94a3b8">Outcome: too recent to tell</span>':(m.o?'<span style="color:#22c55e">Risk classification was right</span>':'<span style="color:#ef4444">Risk classification was wrong</span>'));}
   const tip=$('tip');tip.innerHTML=t;tip.style.display='block';const tx=Math.min(mx+14,r.width-190);tip.style.left=tx+'px';tip.style.top='10px';draw()});
 $('chart').addEventListener('mouseleave',()=>{hover=-1;$('tip').style.display='none';draw()});
+
+
+async function checkServerHealth(){
+ try{const r=await fetch('/api/health?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(!j.ok)throw Error('health check failed');$('chipServer').textContent='API online · '+new Date().toLocaleTimeString();$('chipServer').className='chip ok';}
+ catch(e){$('chipServer').textContent='API unreachable';$('chipServer').className='chip bad';}
+}
+async function loadAssetUniverse(){
+  try{
+    const r=await fetch('/api/universe?t='+Date.now(),{cache:'no-store'}),j=await r.json();
+    assetUniverse=j;populateAssetSelect();
+    if(j.error)$('assetNote').textContent=j.error;
+  }catch(e){$('assetNote').textContent='Instrument directory unavailable; existing QQQ chart remains available.'}
+}
+function populateAssetSelect(){
+  const type=$('assetClass').value,needle=$('assetSearch').value.trim().toLowerCase();
+  const rows=(type==='index'?(assetUniverse.indices||[]):(assetUniverse.equities||[]));
+  const filtered=rows.filter(x=>(x.symbol+' '+x.name).toLowerCase().includes(needle)).slice(0,250);
+  const sel=$('assetSelect'),previous=sel.value;sel.replaceChildren();
+  filtered.forEach(x=>sel.add(new Option(x.symbol+' · '+x.name,x.symbol)));
+  if(previous&&filtered.some(x=>x.symbol===previous))sel.value=previous;
+  if(!filtered.length)sel.add(new Option(type==='equity'?'No Alpaca symbols available':'No matching indices',''));
+  $('assetNote').textContent=type==='equity'?(assetUniverse.equity_count||0)+' active Alpaca equity/ETF symbols · IEX feed and account entitlements apply.':'Daily index observations · FRED is not an intraday exchange feed.';
+}
+$('assetClass').addEventListener('change',populateAssetSelect);
+$('assetSearch').addEventListener('input',populateAssetSelect);
+$('assetSelect').addEventListener('change',()=>{
+  const type=$('assetClass').value,symbol=$('assetSelect').value;
+  if(!symbol)return;
+  selectedAsset={symbol,type};$('chartMode').disabled=(type==='index');if(type==='index')$('chartMode').value='daily';hover=-1;liveBuf=[];
+  $('chartMsg').textContent='Loading '+symbol+' market history…';
+  load();
+});
 $('range').addEventListener('change',load);$('chartMode').addEventListener('change',()=>{hover=-1;load()});
 window.addEventListener('resize',()=>{draw();drawTick()});
-setInterval(load,STATIC?120000:5000);setInterval(()=>{if(data)drawTick()},400);
+setInterval(load,STATIC?120000:15000);setInterval(()=>{if(data)drawTick()},400);
 load();
+
+(()=>{
+ const $mi=id=>document.getElementById(id); if(!$mi('mira-intelligence'))return;
+ let ws=localStorage.getItem('mira-workspace-id'); if(!ws){ws=(crypto.randomUUID?crypto.randomUUID():('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:(r&3|8)).toString(16)})));localStorage.setItem('mira-workspace-id',ws)}
+ const headers={'Content-Type':'application/json','X-MIRA-Workspace':ws};
+ const get=async url=>{const r=await fetch(url,{headers:{'X-MIRA-Workspace':ws},cache:'no-store'});const j=await r.json();if(!r.ok)throw Error(j.error||'Request failed');return j};
+ const post=async(url,data)=>{const r=await fetch(url,{method:'POST',headers,body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw Error(j.error||'Request failed');return j};
+ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const sym=()=>($mi('miSymbol').value||$mi('miThesisSymbol').value||($mi('assetSelect')&&$mi('assetSelect').value)||'AAPL').trim().toUpperCase();
+ function metric(label,value,sub=''){const d=document.createElement('div');d.className='mi-stat';const b=document.createElement('b');b.textContent=value??'Unavailable';const s=document.createElement('span');s.textContent=label+(sub?' · '+sub:'');d.append(b,s);return d}
+ function item(container,title,detail,url){const d=document.createElement('div');d.className='mi-item';const b=document.createElement('b');b.textContent=title||'Untitled evidence';d.append(b);if(detail){const sm=document.createElement('small');sm.textContent=detail;d.append(sm)}if(url&&/^https:\/\//i.test(url)){const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.textContent='Open source';d.append(a)}container.append(d)}
+ async function research(){const s=sym();$mi('miSymbol').value=s;$mi('miResearchStatus').textContent='Retrieving source-linked company evidence…';$mi('miMetrics').replaceChildren();$mi('miFilings').replaceChildren();$mi('miNews').replaceChildren();try{const d=await get('/api/research?symbol='+encodeURIComponent(s));const f=d.fundamentals||{},metrics=f.metrics||{};$mi('miResearchStatus').textContent=(f.company||s)+' · '+(f.source||'SEC source unavailable')+' · Retrieved '+(d.retrieved_at||'—');const labels={revenue:'Latest reported revenue',net_income:'Latest reported net income',total_assets:'Latest reported assets',total_liabilities:'Latest reported liabilities',operating_cash_flow:'Operating cash flow',cash_and_equivalents:'Cash & equivalents'};Object.entries(labels).forEach(([k,l])=>{const x=metrics[k];$mi('miMetrics').append(metric(l,x&&x.value!=null?Number(x.value).toLocaleString(undefined,{maximumFractionDigits:0})+' '+(x.unit||''): 'Unavailable',x?(x.form+' · '+x.period_end+' · filed '+x.filed):'SEC fact not returned'))});if(!f.available)item($mi('miFilings'),'SEC company facts unavailable',f.reason||'Provider not configured');(d.filings&&d.filings.items||[]).forEach(x=>item($mi('miFilings'),x.form+' · '+(x.filed||''),x.description,x.url));if(!(d.filings&&d.filings.items||[]).length&&f.available)item($mi('miFilings'),'No recent supported filings returned');const news=d.news||{};if(!news.available)item($mi('miNews'),'News feed unavailable',news.reason||'No provider connected');(news.items||[]).forEach(x=>item($mi('miNews'),x.headline,x.source+' · '+(x.published_at||''),x.url));const macro=d.macro||{};item($mi('miNews'),'Macro context · '+(macro.source||'FRED'),macro.available?'FRED macro series available':'Unavailable · '+(macro.reason||'No observations returned'));}catch(e){$mi('miResearchStatus').textContent='Research request failed: '+e.message}}
+ async function loadTheses(){try{const d=await get('/api/theses');const box=$mi('miThesisList');box.replaceChildren();(d.items||[]).forEach(t=>{const el=document.createElement('div');el.className='mi-item';const b=document.createElement('b');b.textContent=t.symbol+' · '+t.title;const p=document.createElement('small');p.textContent=t.thesis+' · Last evidence scan: '+(t.last_evidence_check||'pending first background scan');const del=document.createElement('button');del.textContent='Delete';del.style.marginTop='6px';del.onclick=async()=>{try{await post('/api/theses',{delete_id:t.id});loadTheses()}catch(e){$mi('miThesisEvidence').textContent=e.message}};const mon=document.createElement('button');mon.textContent='Check evidence';mon.style.margin='6px';mon.onclick=()=>monitor(t.symbol);el.append(b,p,mon,del);box.append(el)});if(!(d.items||[]).length)box.textContent='No saved theses in this browser workspace.'}catch(e){$mi('miThesisList').textContent=e.message}}
+ async function monitor(s){$mi('miThesisEvidence').textContent='Loading scheduled evidence for '+s+'…';try{let cached=await get('/api/thesis-evidence?symbol='+encodeURIComponent(s));let hit=cached.items&&cached.items.find(x=>x.evidence&&x.evidence.monitor_changes);let d=hit&&hit.evidence;if(!d)d=await get('/api/research?symbol='+encodeURIComponent(s));const box=$mi('miThesisEvidence');box.replaceChildren();const changes=d.monitor_changes||{};const p=document.createElement('p');p.textContent='Evidence for '+s+' · checked '+(changes.checked_at||d.retrieved_at||'just now')+' · new source items since prior scan: '+((changes.new_items||[]).length)+'. Evidence collection is not automated bullish/bearish interpretation.';box.append(p);(changes.new_items||[]).forEach(x=>item(box,'NEW · '+(x.form||x.headline||'Evidence'),x.description||x.source+' · '+x.published_at,x.url));(d.filings&&d.filings.items||[]).forEach(x=>item(box,x.form+' · '+x.filed,x.description,x.url));(d.news&&d.news.items||[]).forEach(x=>item(box,x.headline,x.source+' · '+x.published_at,x.url));if(!(d.filings&&d.filings.items||[]).length&&!(d.news&&d.news.items||[]).length)item(box,'No current evidence sources available',d.fundamentals&&d.fundamentals.reason||d.news&&d.news.reason||'Provider unavailable');}catch(e){$mi('miThesisEvidence').textContent=e.message}}
+ async function saveThesis(){try{const lines=id=>$mi(id).value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);const r=await post('/api/theses',{symbol:$mi('miThesisSymbol').value.toUpperCase(),title:$mi('miThesisTitle').value,thesis:$mi('miThesisText').value,assumptions:lines('miAssumptions'),invalidation:lines('miInvalidation')});$mi('miThesisEvidence').textContent='Thesis saved · '+r.id;loadTheses()}catch(e){$mi('miThesisEvidence').textContent='Could not save thesis: '+e.message}}
+ function parseHoldings(){return $mi('miHoldings').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).map(line=>{const a=line.split(/[;,\t]/);return{symbol:(a[0]||'').trim().toUpperCase(),quantity:Number((a[1]||'').trim())}})}
+ async function savePortfolio(){try{const h=parseHoldings();const r=await post('/api/portfolio',{holdings:h});$mi('miPortfolio').textContent='Saved '+r.holdings+' holdings to this browser workspace.'}catch(e){$mi('miPortfolio').textContent='Could not save: '+e.message}}
+ async function analyzePortfolio(){try{const d=await get('/api/portfolio');const box=$mi('miPortfolio');box.replaceChildren();if(!d.available){box.textContent=d.reason||'Portfolio analysis unavailable';return}const rows=[['Annualized volatility',((d.annualized_volatility||0)*100).toFixed(2)+'%'],['Historical daily VaR 95%',((d.historical_daily_var_95||0)*100).toFixed(2)+'%'],['Historical daily CVaR 95%',((d.historical_daily_cvar_95||0)*100).toFixed(2)+'%'],['Maximum drawdown',((d.max_drawdown||0)*100).toFixed(2)+'%'],['Common observations',String(d.observations)],['As of',d.as_of]];rows.forEach(x=>box.append(metric(x[0],x[1])));item(box,'Methodology',d.method);(d.failed||[]).forEach(x=>item(box,x.symbol+' unavailable',x.reason));(d.holdings||[]).forEach(x=>item(box,x.symbol+' · '+(Number(x.weight||0)*100).toFixed(1)+'% weight','Estimated value '+Number(x.market_value_estimate||0).toFixed(2)+' · volatility contribution '+(x.volatility_contribution_share==null?'—':(Number(x.volatility_contribution_share)*100).toFixed(1)+'%')));Object.entries(d.factor_exposures||{}).forEach(([k,v])=>{if(v&&typeof v==='object')item(box,k+' · S&P 500 beta proxy',v.sp500_beta_proxy==null?(v.reason||'Unavailable'):Number(v.sp500_beta_proxy).toFixed(3)+' · '+v.observations+' observations')});}catch(e){$mi('miPortfolio').textContent='Analysis failed: '+e.message}}
+ async function governance(){try{const d=await get('/api/governance');const box=$mi('miGovernanceView');box.replaceChildren();[['Predictions recorded',d.predictions_recorded],['Predictions graded',d.predictions_graded],['Prospective Brier score',d.brier==null?'Not yet available':Number(d.brier).toFixed(4)],['Prospective log loss',d.log_loss==null?'Not yet available':Number(d.log_loss).toFixed(4)]].forEach(x=>box.append(metric(x[0],x[1])));(d.asset_models||[]).forEach(m=>item(box,m.symbol+' · '+m.instrument_type+' · CHAMPION','Holdout rows '+(m.holdout&&m.holdout.rows||0)+' · Brier '+(m.holdout&&m.holdout.brier!=null?Number(m.holdout.brier).toFixed(4):'—')+' · AUC '+(m.holdout&&m.holdout.auc!=null?Number(m.holdout.auc).toFixed(3):'—')+' · '+(m.data_as_of||'')));(d.challenger_runs||[]).forEach(m=>item(box,m.symbol+' · '+m.status,'Holdout '+(m.holdout&&m.holdout.rows||0)+' · Brier '+(m.holdout&&m.holdout.brier!=null?Number(m.holdout.brier).toFixed(4):'—')+' · '+(m.promotion_reason||'')));}catch(e){$mi('miGovernanceView').textContent=e.message}}
+ async function train(){const s=sym(),type=($mi('assetClass')&&$mi('assetClass').value)||'equity';$mi('miTrain').disabled=true;$mi('miResearchStatus').textContent='Training '+s+' with purged chronological splits…';try{const d=await post('/api/model/train',{symbol:s,type});$mi('miResearchStatus').textContent='Model '+(d.model.status||'stored')+' for '+s+' · holdout Brier '+Number(d.model.holdout.brier).toFixed(4)+' · AUC '+(d.model.holdout.auc==null?'unavailable':Number(d.model.holdout.auc).toFixed(3))+' · data through '+d.model.data_as_of;await governance()}catch(e){$mi('miResearchStatus').textContent='Training unavailable: '+e.message+'. Training is owner-only on the hosted service; run it from the private owner environment.'}finally{$mi('miTrain').disabled=false}}
+ $mi('miResearch').onclick=research;$mi('miTrain').onclick=train;$mi('miSaveThesis').onclick=saveThesis;$mi('miSavePortfolio').onclick=savePortfolio;$mi('miAnalyzePortfolio').onclick=analyzePortfolio;$mi('miGovernance').onclick=governance;$mi('miRefresh').onclick=()=>{research();loadTheses();analyzePortfolio();governance()};loadTheses();governance();
+})();
 </script>
-</body>
+<script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(d.enabled?'COLLECTING / MONITORING':'OFFLINE');$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script></body>
 </html>
