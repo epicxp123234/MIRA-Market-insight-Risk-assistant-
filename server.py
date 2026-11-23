@@ -8,7 +8,7 @@ class QuietServer(ThreadingHTTPServer):
         if isinstance(exc,(ConnectionAbortedError,ConnectionResetError,BrokenPipeError,socket.timeout)): return
         super().handle_error(request,client_address)
 from pathlib import Path
-import json, math, random, csv, io, time, os, sqlite3, ctypes, hmac
+import json, math, random, csv, io, time, os, sqlite3, ctypes, hmac, re
 from contextlib import closing
 from datetime import date, datetime, time as dt_time, timezone, timedelta
 from urllib.request import Request, urlopen
@@ -40,6 +40,7 @@ MARKET_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 MARKET_API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 MARKET_CACHE = {"at":0.0,"data":None}
 MARKET_REFRESH_LOCK = threading.Lock()
+MARKET_LEARNING_LAST = 0.0
 MINUTE_CACHE={"at":0.0,"bars":[],"status":"not fetched","error":None}
 MINUTE_REFRESH_LOCK=threading.Lock()
 
@@ -137,7 +138,7 @@ def market_session(now=None):
     return "closed"
 
 def fetch_market_snapshot(force=False):
-    global MARKET_CACHE
+    global MARKET_CACHE, MARKET_LEARNING_LAST
     if not MARKET_API_KEY or not MARKET_API_SECRET:
         return {"connected":False,"configured":False,"provider":"Alpaca Basic · free IEX","symbol":"QQQ","error":"Connect free Alpaca market-data keys to enable live quotes."}
     if not force and MARKET_CACHE["data"] and time.time()-MARKET_CACHE["at"] < 3:
@@ -175,6 +176,9 @@ def fetch_market_snapshot(force=False):
     change=(float(display_price)/float(previous)-1) if display_price is not None and previous not in (None,0) else None
     result={"connected":True,"configured":True,"provider":"Alpaca Basic · "+feed_note,"feed":feed,"symbol":"QQQ","instrument":"Invesco QQQ ETF · Nasdaq-100 proxy","session":session,"freshness":freshness,"last":display_price,"price_label":"Indicative midpoint" if feed=="overnight" else "Latest trade","trade_at":stamp,"age_seconds":age,"bid":bid,"ask":ask,"quote_at":quote_stamp,"quote_age_seconds":quote_age,"day_change_pct":change,"day_high":day.get("h"),"day_low":day.get("l"),"previous_close":previous,"market_time":now.isoformat(timespec="seconds"),"disclaimer":"Quote feed is separate from the daily-trained neural forecast; the model does not use this intraday quote to generate its probability."}
     MARKET_CACHE={"at":time.time(),"data":result}
+    if display_price is not None and time.time()-MARKET_LEARNING_LAST>=60:
+        MARKET_LEARNING_LAST=time.time()
+        record_learning_event("alpaca_market","live_quote_snapshot","QQQ",{"price":display_price,"bid":bid,"ask":ask,"trade_at":stamp,"quote_at":quote_stamp,"feed":feed,"session":session,"freshness":freshness},observed_at=stamp or quote_stamp or now.isoformat(timespec="seconds"))
     return result
 
 
@@ -316,6 +320,7 @@ def train(payload):
                 if label in (0,1) and all(math.isfinite(v) for v in x): data.append({"x":x,"y":int(label),"id":i+1})
             except (ValueError,TypeError,KeyError): pass
         if len(data)<20: raise ValueError("Need at least 20 complete rows with target labels 0 or 1.")
+        record_learning_event("user_dataset","uploaded_csv_dataset",str(payload.get("instrument") or "CUSTOM"),{"rows":len(data),"numeric_features":features,"target":target,"label_classes":sorted(set(row["y"] for row in data)),"raw_customer_rows_stored":False})
         TASK="uploaded CSV · target="+target
     else:
         data=[make_case(TASK,i) for i in range(size)]
@@ -365,6 +370,7 @@ TOOLS = [
 
 def inspect_market_evaluation():
     report_path=DATA_DIR/"models"/"nasdaq100_training_report.json"
+    _supabase_restore_file(report_path,"models/nasdaq100_training_report.json")
     try: report=json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError,json.JSONDecodeError): return {"error":"No saved market evaluation is available. Run a fresh market evaluation first."}
     def compact(task):
@@ -500,12 +506,14 @@ def forecast_nasdaq(payload):
     model_dir=DATA_DIR/"models";model_dir.mkdir(exist_ok=True)
     saved={"model_name":"MIRA — Market Insight & Risk Assistant","instrument":payload.get("instrument","Nasdaq-100"),"as_of":prices[-1][0].date().isoformat(),"features":["return_1d","return_2d","return_5d","return_10d","return_20d","volatility_5d","volatility_20d","volume_log_change"],"mean":full_mean,"scale":full_scale,"direction_model":full_up,"drawdown_risk_model":full_risk,"volatility_regime_model":full_vol,"stress_threshold":stress_threshold,"train_rows":len(examples),"architecture":"Three 8 → 8 → 1 neural-network ensembles (9 MLP members total)","ensemble_members":3,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs}}
     (model_dir/"nasdaq100_model.json").write_text(json.dumps(saved,indent=2),encoding="utf-8")
+    _supabase_backup_file(model_dir/"nasdaq100_model.json","models/nasdaq100_model.json")
     MODEL=full_up
     NASDAQ_RESULT={"instrument":saved["instrument"],"as_of":saved["as_of"],"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"holdout_direction_accuracy":up["accuracy"],"holdout_direction_balanced_accuracy":direction_balanced,"direction_majority_baseline":up_base,"holdout_direction_precision":up["precision"],"holdout_direction_recall":up["recall"],"holdout_direction_fpr":up["fpr"],"holdout_direction_fnr":up["fnr"],"direction_confusion":up["counts"],"holdout_stress_accuracy":risk["accuracy"],"holdout_stress_balanced_accuracy":stress_balanced,"stress_majority_baseline":risk_base,"stress_precision":risk["precision"],"stress_recall":risk["recall"],"stress_fpr":risk["fpr"],"stress_fnr":risk["fnr"],"stress_confusion":risk["counts"],"volatility_regime_holdout_accuracy":volatility["accuracy"],"volatility_regime_balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"volatility_regime_baseline_accuracy":max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol),"stress_threshold":stress_threshold,"stress_threshold_validation_f2":threshold_selection["f2"],"stress_validation_precision":threshold_selection.get("validation_precision"),"stress_validation_recall":threshold_selection.get("validation_recall"),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"training_rows":len(raw_fit),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"historical_nasdaq100_20pct_drawdowns":episode_count,"target":"up/down: next close; 20-session 10% drawdown; elevated forward volatility relative to trailing volatility","learning_trace":logs,"holdout_trace":up["trace"][-30:],"saved_model":"data/models/nasdaq100_model.json","probability_warning":"Experimental ensemble outputs; not calibrated, not a trade instruction."}
     confusion=lambda counts:{"true_positive":counts["tp"],"false_positive":counts["fp"],"true_negative":counts["tn"],"false_negative":counts["fn"]}
     vol_base=max(sum(o["y"] for o in test_vol),len(test_vol)-sum(o["y"] for o in test_vol))/len(test_vol)
     report={"model_name":saved["model_name"],"instrument":saved["instrument"],"data_as_of":saved["as_of"],"trained_on":datetime.now().date().isoformat(),"signal":signal,"next_session_up_probability":round(p_up,5),"next20_session_10pct_drawdown_risk":round(p_risk,5),"next20_session_high_volatility_probability":round(p_volatility,5),"direction":{"holdout_accuracy":up["accuracy"],"majority_baseline_accuracy":up_base,"balanced_accuracy":direction_balanced,"precision":up["precision"],"recall":up["recall"],"false_positive_rate":up["fpr"],"false_negative_rate":up["fnr"],"confusion":confusion(up["counts"])},"stress":{"holdout_accuracy":risk["accuracy"],"majority_baseline_accuracy":risk_base,"balanced_accuracy":stress_balanced,"precision":risk["precision"],"recall":risk["recall"],"false_positive_rate":risk["fpr"],"false_negative_rate":risk["fnr"],"confusion":confusion(risk["counts"]),"decision_threshold":stress_threshold,"threshold_selection":"F2 on separate chronological validation block","validation_precision":threshold_selection.get("validation_precision"),"validation_recall":threshold_selection.get("validation_recall")},"volatility_regime":{"holdout_accuracy":volatility["accuracy"],"majority_baseline_accuracy":vol_base,"balanced_accuracy":(volatility["recall"]+1-volatility["fpr"])/2,"precision":volatility["precision"],"recall":volatility["recall"],"false_positive_rate":volatility["fpr"],"false_negative_rate":volatility["fnr"],"confusion":confusion(volatility["counts"]),"target":"next 20-session realized volatility exceeds 1.35 times the trailing 20-session realized volatility"},"train_rows":len(raw_fit),"validation_rows":len(raw_validation),"holdout_rows":len(raw_test),"purged_boundary_rows":20,"validation_best_epochs":{"direction":direction_best_epochs,"stress":stress_best_epochs,"volatility_regime":volatility_best_epochs},"ensemble_members_per_task":3,"features":["1/2/5/10/20-session returns","5/20-session volatility","volume change if provided"],"target_definitions":{"direction":"next recorded close higher than current close","stress":"any close in next 20 sessions at least 10% below current close"},"crash_event_counts":{"nasdaq100_daily_20pct_drawdowns":episode_count},"training_method":"Three independently seeded neural networks per task; ensemble predictions average member probabilities. Each member uses validation-loss early stopping and the final serving ensemble is refit using selected epoch counts.","limitation":"One chronological holdout after a 20-session purge; the stress decision threshold is selected on a separate validation block to favor recall. Probabilities are not calibrated. Research output only."}
     (model_dir/"nasdaq100_training_report.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
+    _supabase_backup_file(model_dir/"nasdaq100_training_report.json","models/nasdaq100_training_report.json")
     visible_status("complete","Forecast complete · signal %s · direction %.1f%% · stress risk %.1f%%"%(signal,p_up*100,p_risk*100),1,{"label":"direction forecast","epoch":55,"epochs":55,"model":full_up,"sample":latest})
     return NASDAQ_RESULT
 
@@ -556,7 +564,10 @@ import threading
 PRICE_STATE={"checked_at":0.0,"fred":"not checked yet","alpaca":"not checked yet","extra":[],"appended":0,"last_csv_date":None,"updated":None}
 PRICE_LOCK=threading.Lock()
 
-def _csv_path(): return DATA_DIR/"nasdaq100_daily.csv"
+def _csv_path():
+    path=DATA_DIR/"nasdaq100_daily.csv"
+    _supabase_restore_file(path,"nasdaq100_daily.csv")
+    return path
 
 def _load_csv_series():
     path=_csv_path()
@@ -633,6 +644,7 @@ def _append_to_csv(new_rows):
     for d,v in new_rows:
         rec=[""]*len(names); rec[date_col]=d; rec[close_col]="%.3f"%v; writer.writerow(rec)
     tmp=path.with_suffix(".csv.tmp"); tmp.write_text(body+"\n"+buf.getvalue(),encoding="utf-8"); os.replace(tmp,path)
+    _supabase_backup_file(path,"nasdaq100_daily.csv")
 
 def _alpaca_chain(last_date,last_close):
     start=(date.fromisoformat(last_date)-timedelta(days=6)).isoformat()
@@ -664,6 +676,8 @@ def refresh_prices(force=False):
         PRICE_STATE["extra"]=[]
         PRICE_STATE["last_csv_date"]=last
         PRICE_STATE["updated"]=datetime.now().isoformat(timespec="seconds")
+        if dates and closes:
+            record_learning_event("fred_market","official_daily_close","NASDAQ100",{"date":dates[-1],"close":closes[-1],"observations":len(dates),"provider_status":PRICE_STATE.get("fred")},observed_at=dates[-1]+"T23:59:00+00:00")
         return PRICE_STATE
 
 def price_data_note():
@@ -682,7 +696,10 @@ def price_data_note():
 INTRADAY_STATE={"status":"not started","bars":0,"first":None,"last":None,"days":0,"ab":None,"collected_at":None}
 INTRADAY_LOCK=threading.Lock()
 
-def intraday_path(): return DATA_DIR/"intraday_qqq_1h.csv"
+def intraday_path():
+    path=DATA_DIR/"intraday_qqq_1h.csv"
+    _supabase_restore_file(path,"intraday_qqq_1h.csv")
+    return path
 
 def intraday_load():
     path=intraday_path(); out=[]
@@ -806,8 +823,11 @@ def intraday_collect(max_pages=8):
             w=csv.writer(f,lineterminator="\n")
             if new: w.writerow(["t","o","h","l","c","v"])
             w.writerows(added)
+        _supabase_backup_file(path,"intraday_qqq_1h.csv")
     allb=intraday_load(); INTRADAY_STATE.update({"days":len(intraday_features(allb)),"bars":len(allb),"first":allb[0][0] if allb else None,"last":allb[-1][0] if allb else None,"collected_at":datetime.now().isoformat(timespec="seconds"),"status":("collected %d new hourly bars"%len(added)) if added else "up to date"})
     if token: INTRADAY_STATE["status"]+=" (history download continues next cycle)"
+    if added:
+        record_learning_event("alpaca_market","hourly_bars_ingested","QQQ",{"new_bars":len(added),"first":added[0][0],"last":added[-1][0],"latest_close":added[-1][4]})
     return len(added)
 
 def _et_of(t_iso): return eastern_now(datetime.fromisoformat(t_iso.replace("Z","+00:00")))
@@ -1248,7 +1268,10 @@ def refresh_macro(force=False):
     if not force and time.time()-MACRO_CACHE["at"]<21600: return MACRO_CACHE
     MACRO_CACHE["at"]=time.time()
     for name,sid in MACRO_SERIES_IDS.items():
-        try: MACRO_CACHE["series"][name]=_fred_series(sid)
+        try:
+            MACRO_CACHE["series"][name]=_fred_series(sid)
+            ds,vs=MACRO_CACHE["series"][name]
+            if ds: record_learning_event("fred_macro","macro_observation",name.upper(),{"series":name,"fred_id":sid,"date":ds[-1],"value":vs[-1]},observed_at=ds[-1]+"T23:59:00+00:00")
         except Exception as exc: MACRO_CACHE["errors"][name]=str(exc)[:100]
     return MACRO_CACHE
 
@@ -1271,7 +1294,10 @@ def macro_row(d):
 BRAIN_JOB={"running":False,"message":"","error":None,"started":None}
 BRAIN_LOCK=threading.Lock()
 
-def brain_path(): return DATA_DIR/"models"/"mira_risk_brain.json"
+def brain_path():
+    path=DATA_DIR/"models"/"mira_risk_brain.json"
+    _supabase_restore_file(path,"models/mira_risk_brain.json")
+    return path
 
 def brain_load():
     try: return json.loads(brain_path().read_text(encoding="utf-8"))
@@ -1383,6 +1409,7 @@ def train_brain(dates,closes,hidden=8,feature_names=None):
         mem,ep=brain_fit_member(fit,val,seed,hidden,60,"Risk brain test fit %d/3 (%d hidden)"%(k+1,hidden),0.05+0.2*k/3,0.2/3); members.append(mem); epochs.append(ep)
     ev=brain_ensemble(members)
     p_val=brain_predict_ids(ev,mean,scale,feats,val_ids); p_hold=brain_predict_ids(ev,mean,scale,feats,hold_ids)
+    validation_auc=auc_score([p_val[i] for i in val_ids],[ys[i] for i in val_ids])
     best_thr=None; best_score=-1e9
     for step in range(6,17):          # alarm levels 15% .. 40%
         thr=step*0.025; n=len(closes); pos=[None]*n
@@ -1397,7 +1424,7 @@ def train_brain(dates,closes,hidden=8,feature_names=None):
     s_mean,s_scale=brain_stats([feats[i] for i in idx]); allrows=brain_scaled(feats,ys,idx,s_mean,s_scale); serving=[]
     for k,seed in enumerate(BRAIN_SEEDS):
         mem,_=brain_fit_member(allrows,None,seed,hidden,max(8,epochs[k]),"Risk brain final fit %d/3"%(k+1),0.28+0.1*k/3,0.1/3); serving.append(mem)
-    return {"version":2,"created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":feature_names,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"holdout":holdout,"history":[]}
+    return {"version":2,"created":datetime.now().isoformat(timespec="seconds"),"trained_through":dates[-1],"rows_at_training":len(closes),"checked_rows":len(closes),"hidden":hidden,"features":feature_names,"horizon_days":BRAIN_HORIZON,"drop":BRAIN_DROP,"threshold":best_thr,"mean":s_mean,"scale":s_scale,"members":serving,"validation_epochs":epochs,"eval":{"mean":mean,"scale":scale,"members":members,"holdout_start":dates[hold_ids[0]],"holdout_end":dates[hold_ids[-1]]},"validation":{"rows":len(val_ids),"auc":validation_auc,"base_rate":sum(ys[i] for i in val_ids)/len(val_ids)},"holdout":holdout,"history":[]}
 
 def brain_risk_now(brain,dates,closes):
     x=select_features(brain_feature_rows(dates,closes)[-1],brain.get("features",BRAIN_FEATURES))
@@ -1405,6 +1432,7 @@ def brain_risk_now(brain,dates,closes):
 
 def brain_save(brain):
     path=brain_path(); path.parent.mkdir(parents=True,exist_ok=True); path.write_text(json.dumps(brain),encoding="utf-8")
+    _supabase_backup_file(path,"models/mira_risk_brain.json")
 
 def brain_job(force=False):
     """Train the first brain, or retrain on newer data and promote the new version only if it holds up on unseen days."""
@@ -1412,8 +1440,14 @@ def brain_job(force=False):
         dates,closes=load_price_series(); champ=brain_load()
         if champ is None:
             BRAIN_JOB["message"]="Training the first neural risk brain..."
-            brain=train_brain(dates,closes,8); brain["history"]=[{"date":dates[-1],"event":"first brain trained","holdout_auc":brain["holdout"]["auc"]}]
-            brain_save(brain); BRAIN_JOB["message"]="First brain trained."
+            try: refresh_macro()
+            except Exception: pass
+            usable_macro=all(MACRO_CACHE.get("series",{}).get(k) and MACRO_CACHE["series"][k][0] for k in ("yield_10y","credit_spread"))
+            initial_features=ALL_FEATURES if usable_macro else BRAIN_FEATURES
+            brain=train_brain(dates,closes,8,feature_names=initial_features)
+            brain["history"]=[{"date":dates[-1],"event":"first brain trained","features":initial_features,"holdout_auc":brain["holdout"]["auc"]}]
+            brain_save(brain); BRAIN_JOB["message"]="First brain trained with %s inputs."%len(initial_features)
+            record_learning_event("model_governance","initial_model_trained","NASDAQ100",{"trained_through":dates[-1],"features":initial_features,"holdout":brain.get("holdout")})
         elif not force and len(closes)-champ.get("checked_rows",0)<21:
             BRAIN_JOB["message"]="Brain is up to date."
         else:
@@ -1431,18 +1465,24 @@ def brain_job(force=False):
                 candidates.append((champ["hidden"],"with macro features (10-year yield change, credit spread, recession flag)",0.01,ALL_FEATURES))
             results=[]
             for hidden,kind,tol,feature_names in candidates:
-                cand=train_brain(dates,closes,hidden,feature_names); results.append((cand,kind,tol,cand["holdout"]["auc"]))
-            note=[]; winner=None; win_auc=-1
-            for cand,kind,tol,auc in results:
-                ok=(auc is not None and champ_auc is not None and auc>=champ_auc+tol)
-                note.append({"candidate":kind,"auc":auc,"champion_auc_same_days":champ_auc,"promoted_if":">= champion %+.3f"%tol,"qualified":bool(ok)})
-                if ok and auc>win_auc: winner,win_auc=cand,auc
-            event={"date":dates[-1],"event":"self-improvement check","champion_auc_same_days":champ_auc,"candidates":note,"promoted":winner is not None}
+                cand=train_brain(dates,closes,hidden,feature_names)
+                results.append((cand,kind,tol,cand.get("validation",{}).get("auc"),cand["holdout"].get("auc")))
+            # Candidate choice uses the validation block only. The chronological holdout is reserved for the final promotion gate.
+            eligible=[x for x in results if x[3] is not None]
+            selected=max(eligible,key=lambda x:x[3]) if eligible else None
+            winner=None; win_auc=None; selected_kind=None; selected_tol=None
+            if selected is not None:
+                cand,selected_kind,selected_tol,val_auc,hold_auc=selected
+                if hold_auc is not None and champ_auc is not None and hold_auc>=champ_auc+selected_tol:
+                    winner,win_auc=cand,hold_auc
+            note=[{"candidate":kind,"validation_auc":val_auc,"holdout_auc":hold_auc,"selected_by_validation":bool(selected and cand is selected[0]),"champion_holdout_auc":champ_auc,"promotion_margin":tol,"qualified":bool(selected and cand is selected[0] and winner is not None)} for cand,kind,tol,val_auc,hold_auc in results]
+            event={"date":dates[-1],"event":"self-improvement check","selection_metric":"chronological validation AUC","champion_holdout_auc_same_days":champ_auc,"candidates":note,"promoted":winner is not None}
             hist=(champ.get("history") or [])+[event]
             if winner is not None:
-                winner["history"]=hist[-20:]; brain_save(winner); BRAIN_JOB["message"]="New brain promoted (holdout AUC %.3f vs %.3f)."%(win_auc,champ_auc or 0)
+                winner["history"]=hist[-20:]; brain_save(winner); BRAIN_JOB["message"]="New brain promoted after validation selection and holdout confirmation (AUC %.3f vs %.3f)."%(win_auc,champ_auc or 0)
             else:
-                champ["history"]=hist[-20:]; champ["checked_rows"]=len(closes); brain_save(champ); BRAIN_JOB["message"]="Kept the current brain; challengers did not qualify."
+                champ["history"]=hist[-20:]; champ["checked_rows"]=len(closes); brain_save(champ); BRAIN_JOB["message"]="Kept the current brain; selected challenger failed the final holdout promotion gate."
+            record_learning_event("model_governance","challenger_evaluation","NASDAQ100",event)
         visible_status("complete",BRAIN_JOB["message"],1)
     except Exception as exc:
         BRAIN_JOB["error"]=str(exc); BRAIN_JOB["message"]="Brain job failed: "+str(exc); visible_status("error",str(exc),0.0)
@@ -1845,49 +1885,96 @@ def refresh_prices_background():
         threading.Thread(target=refresh_prices,args=(True,),daemon=True).start()
     # else: a refresh is already in flight (this request or the background loop) - don't pile on, just use what's on disk right now.
 
+def _fit_garch11(returns):
+    """Grid-MLE for a constrained Gaussian GARCH(1,1); returns None if fit is unstable."""
+    n=len(returns); mu=sum(returns)/n; centered=[x-mu for x in returns]
+    var=sum(x*x for x in centered)/max(1,n-1)
+    best=None
+    for alpha_i in range(2,21,2):
+        alpha=alpha_i/100
+        for beta_i in range(50,96,3):
+            beta=beta_i/100
+            if alpha+beta>=.995: continue
+            omega=max(1e-12,(1-alpha-beta)*var); h=max(var,1e-12); ll=0.0
+            for e in centered:
+                h=max(1e-12,omega+alpha*e*e+beta*h)
+                ll+=-.5*(math.log(2*math.pi)+math.log(h)+(e*e/h))
+            if best is None or ll>best[0]: best=(ll,omega,alpha,beta,h)
+    if best is None: return None
+    ll,omega,alpha,beta,h=best
+    return {"next_volatility_pct":math.sqrt(h)*100,"persistence":alpha+beta,"alpha":alpha,"beta":beta,"omega":omega,"log_likelihood":ll,"fit":"Constrained Gaussian maximum-likelihood grid fit; in-sample diagnostic, not a forecast guarantee"}
+
+
+def _fit_two_state_vol_hmm(returns, iterations=35):
+    """Two-state zero-mean Gaussian volatility HMM with Baum-Welch EM and filtered state probability."""
+    n=len(returns)
+    if n<80: return {"high_volatility_probability_next":None,"fit_rows":0,"status":"Not fitted: at least 80 returns required."}
+    v=sum(x*x for x in returns)/n
+    if v<=1e-12: return {"high_volatility_probability_next":None,"fit_rows":n,"status":"Not fitted: near-zero return variance."}
+    trans=[[.97,.03],[.08,.92]]; variances=[max(v*.45,1e-10),max(v*2.2,1e-10)]; prior=[.8,.2]
+    def emission(x, vv): return max(1e-300,math.exp(max(-700,-.5*(math.log(2*math.pi*vv)+x*x/vv))))
+    for _ in range(iterations):
+        emit=[[emission(x,variances[j]) for j in range(2)] for x in returns]
+        f=[[0.0,0.0] for _ in range(n)]; scales=[0.0]*n
+        for j in range(2): f[0][j]=prior[j]*emit[0][j]
+        scales[0]=sum(f[0]) or 1e-300; f[0]=[x/scales[0] for x in f[0]]
+        for t in range(1,n):
+            for j in range(2): f[t][j]=emit[t][j]*sum(f[t-1][i]*trans[i][j] for i in range(2))
+            scales[t]=sum(f[t]) or 1e-300; f[t]=[x/scales[t] for x in f[t]]
+        b=[[1.0,1.0] for _ in range(n)]
+        for t in range(n-2,-1,-1):
+            for i in range(2): b[t][i]=sum(trans[i][j]*emit[t+1][j]*b[t+1][j] for j in range(2))/max(scales[t+1],1e-300)
+        gamma=[]
+        for t in range(n):
+            z=[f[t][j]*b[t][j] for j in range(2)]; sm=sum(z) or 1e-300; gamma.append([x/sm for x in z])
+        xi=[[0.0,0.0],[0.0,0.0]]
+        for t in range(n-1):
+            z=[[f[t][i]*trans[i][j]*emit[t+1][j]*b[t+1][j] for j in range(2)] for i in range(2)]
+            sm=sum(sum(row) for row in z) or 1e-300
+            for i in range(2):
+                for j in range(2): xi[i][j]+=z[i][j]/sm
+        prior=gamma[0][:]
+        for i in range(2):
+            den=sum(xi[i])
+            if den>1e-9: trans[i]=[max(.001,xi[i][j]/den) for j in range(2)]
+            den=sum(gamma[t][i] for t in range(n))
+            if den>1e-9: variances[i]=max(1e-10,sum(gamma[t][i]*returns[t]**2 for t in range(n))/den)
+        # Keep state labels stable: state 1 is always the higher-volatility state.
+        if variances[0]>variances[1]:
+            variances.reverse(); prior.reverse(); trans=[[trans[1][1],trans[1][0]],[trans[0][1],trans[0][0]]]
+    # Filter one-step probability from the final filtered state and transition matrix.
+    prob_high=sum(f[-1][i]*trans[i][1] for i in range(2))
+    return {"high_volatility_probability_next":max(0.0,min(1.0,prob_high)),"fit_rows":n,"state_variances_pct2":[variances[0]*10000,variances[1]*10000],"transition_matrix":trans,"status":"Fitted two-state Gaussian volatility HMM by Baum-Welch EM; in-sample regime estimate."}
+
+
 def chart_quantitative_intelligence(dates, closes):
-    """Transparent daily-return diagnostics; unavailable methods remain explicitly unavailable."""
+    """Causal statistical diagnostics; fitted models disclose estimation method and sample size."""
     returns=[]
     for a,b in zip(closes[:-1],closes[1:]):
         if a>0 and b>0:
             r=math.log(b/a)
             if math.isfinite(r): returns.append(r)
-    if len(returns)<30:
-        return {"available":False,"reason":"At least 30 valid daily log returns are required.",
-                "as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),
-                "bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},
-                "derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None}}
+    if len(returns)<80:
+        return {"available":False,"reason":"At least 80 valid daily log returns are required for the fitted regime and volatility diagnostics.","as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),"bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},"derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None}}
     n=len(returns); mu=sum(returns)/n
-    var=sum((x-mu)**2 for x in returns)/(n-1)
-    obs_var=max(var,1e-12)
-    # Normal prior N(0, 1%²) and Normal likelihood with sample variance.
-    prior_var=0.01**2
-    post_var=1.0/(1.0/prior_var+n/obs_var)
-    post_mean=post_var*(n*mu/obs_var)
-    z=post_mean/math.sqrt(post_var)
-    p_positive=0.5*(1.0+math.erf(z/math.sqrt(2.0)))
-    # Scalar Kalman filter for latent mean daily return.
-    q=max(obs_var*0.01,1e-12); state=0.0; state_var=prior_var
+    # Conjugate Normal-Normal posterior; posterior probability is not a directional trading edge.
+    obs_var=sum((x-mu)**2 for x in returns)/(n-1); obs_var=max(obs_var,1e-12)
+    prior_mean=0.0; prior_var=.005**2
+    post_var=1/(1/prior_var+n/obs_var); post_mean=post_var*(prior_mean/prior_var+n*mu/obs_var)
+    z=post_mean/math.sqrt(post_var); p_positive=.5*(1+math.erf(z/math.sqrt(2)))
+    # Local-level Kalman filter; process noise fixed at 1% of sample observation variance.
+    q=max(obs_var*.01,1e-12); state=prior_mean; state_var=prior_var
     for obs in returns:
-        state_var+=q; gain=state_var/(state_var+obs_var)
-        state+=gain*(obs-state); state_var=(1.0-gain)*state_var
-    # Fixed-parameter GARCH(1,1) baseline; explicitly not an estimated fit.
-    alpha,beta=0.05,0.90; omega=(1.0-alpha-beta)*obs_var
-    h=max(obs_var,1e-12)
-    for r in returns: h=omega+alpha*(r-mu)**2+beta*h
-    first=returns[-1]-returns[-2] if n>=2 else None
-    second=returns[-1]-2*returns[-2]+returns[-3] if n>=3 else None
+        state_var+=q; gain=state_var/(state_var+obs_var); state+=gain*(obs-state); state_var=(1-gain)*state_var
+    garch=_fit_garch11(returns); hmm=_fit_two_state_vol_hmm(returns)
+    first=returns[-1]-returns[-2]; second=returns[-1]-2*returns[-2]+returns[-3]
     return {"available":True,"as_of_date":dates[-1],"as_of_returns":n,
-        "bayesian_drift":{"probability_positive":p_positive,"posterior_mean_pct":post_mean*100,
-            "posterior_sd_pct":math.sqrt(post_var)*100,"prior":"Normal(0, 1% per session)"},
-        "kalman":{"trend_pct_per_session":state*100,"process_variance":q,"observation_variance":obs_var},
-        "garch":{"next_volatility_pct":math.sqrt(max(h,0))*100,"persistence":alpha+beta,
-            "alpha":alpha,"beta":beta,"omega":omega,"fit":"Fixed-coefficient GARCH(1,1) baseline; not maximum-likelihood fitted"},
-        "hmm":{"high_volatility_probability_next":None,"fit_rows":0,
-            "status":"Not fitted; no HMM probability is reported."},
-        "derivative_features":{"first_difference_daily_log_return":first,
-            "second_difference_change_in_daily_log_return":second},
-        "optimization":{"solver":"Not run: no validated directional objective is fitted","curvature":None}}
+      "bayesian_drift":{"probability_positive":p_positive,"posterior_mean_pct":post_mean*100,"posterior_sd_pct":math.sqrt(post_var)*100,"prior":"Normal(0, 0.5% per session)","interpretation":"Posterior sign probability for mean historical daily log return; not probability of next-session price increase."},
+      "kalman":{"trend_pct_per_session":state*100,"state_variance":state_var,"process_variance":q,"observation_variance":obs_var,"method":"Scalar local-level filter; process variance fixed at 1% of sample observation variance."},
+      "garch":garch or {"next_volatility_pct":None,"fit":"Unavailable: constrained likelihood fit failed"},
+      "hmm":hmm,
+      "derivative_features":{"first_difference_daily_log_return":first,"second_difference_change_in_daily_log_return":second},
+      "optimization":{"solver":"No directional optimizer: no validated portfolio objective or constraints were supplied","curvature":None}}
 
 def chart_fast_verdict(dates, closes, brain):
     """Separate downside-risk alarm from trend direction; never relabel risk as BUY/SELL."""
@@ -1966,6 +2053,9 @@ def chart_payload(days=180):
             research_replay=[]; scoreboard={"available":False}
         try: verdict=chart_fast_verdict(ndx_dates,ndx_closes,brain)
         except Exception as exc: verdict={"error":str(exc)[:120]}
+        if brain is not None and not verdict.get("error"):
+            try: _record_ndx_prediction(ndx_dates,ndx_closes,verdict)
+            except Exception: pass
         data={"as_of":ndx_dates[-1],"days":days,
             "dates":qqq_dates,"closes":[c["c"] for c in qqq_candles],"candles":qqq_candles,
             "chart_instrument":"QQQ","chart_source":"Alpaca IEX hourly bars aggregated into daily OHLC",
@@ -1991,6 +2081,835 @@ def chart_payload(days=180):
     out["intraday_status"]={"status":MINUTE_CACHE.get("status"),"bars":len(minute),
         "source":"Alpaca IEX 1-minute QQQ bars","error":MINUTE_CACHE.get("error")}
     return out
+
+
+# Multi-asset market data. The existing neural model is trained only on NASDAQ100;
+# other symbols receive market data and statistical diagnostics, never borrowed predictions.
+ASSET_UNIVERSE_CACHE={"at":0.0,"equities":[],"error":None}
+ASSET_CHART_CACHE={}
+ASSET_INDEX_SERIES={"NASDAQ100":"NASDAQ100","SP500":"SP500","DJIA":"DJIA"}
+
+def asset_universe_payload():
+    now=time.time()
+    indices=[
+        {"symbol":"NASDAQ100","name":"Nasdaq-100","type":"index","source":"FRED","live":False},
+        {"symbol":"SP500","name":"S&P 500","type":"index","source":"FRED","live":False},
+        {"symbol":"DJIA","name":"Dow Jones Industrial Average","type":"index","source":"FRED","live":False},
+    ]
+    if now-ASSET_UNIVERSE_CACHE["at"]>3600:
+        if not (MARKET_API_KEY and MARKET_API_SECRET):
+            ASSET_UNIVERSE_CACHE.update({"at":now,"equities":[],"error":"Alpaca credentials are not configured."})
+        else:
+            try:
+                req=Request("https://paper-api.alpaca.markets/v2/assets?status=active&asset_class=us_equity",
+                    headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"})
+                with urlopen(req,timeout=18) as response: raw=json.loads(response.read())
+                assets=[]
+                for a in raw if isinstance(raw,list) else []:
+                    sym=str(a.get("symbol","")).upper()
+                    if not re.fullmatch(r"[A-Z0-9.-]{1,12}",sym): continue
+                    if not a.get("tradable",False): continue
+                    assets.append({"symbol":sym,"name":str(a.get("name") or sym)[:100],
+                        "type":"equity","exchange":a.get("exchange"),"source":"Alpaca IEX",
+                        "live":True,"asset_class":a.get("class","us_equity")})
+                ASSET_UNIVERSE_CACHE.update({"at":now,"equities":sorted(assets,key=lambda x:x["symbol"]),"error":None})
+            except Exception as exc:
+                ASSET_UNIVERSE_CACHE.update({"at":now,"equities":[],"error":"Alpaca asset directory unavailable: "+str(exc)[:120]})
+    return {"indices":indices,"equities":ASSET_UNIVERSE_CACHE["equities"],
+        "equity_count":len(ASSET_UNIVERSE_CACHE["equities"]),"error":ASSET_UNIVERSE_CACHE["error"],
+        "note":"Alpaca's active US equity/ETF directory; availability and market-data entitlements depend on your subscription."}
+
+def _fred_series_all(series_id, days):
+    start=(date.today()-timedelta(days=max(500,days*2))).isoformat()
+    if FRED_API_KEY:
+        rows=_fred_api(series_id,start)
+    else:
+        url="https://fred.stlouisfed.org/graph/fredgraph.csv?id="+series_id+"&cosd="+start
+        req=Request(url,headers={"User-Agent":"MIRA-research/1.0"})
+        with urlopen(req,timeout=20) as response: raw=response.read().decode("utf-8-sig")
+        rows=[]
+        for row in csv.DictReader(io.StringIO(raw)):
+            try: rows.append((row.get("observation_date") or row.get("DATE"),float(row.get(series_id) or row.get("VALUE"))))
+            except (ValueError,TypeError): continue
+    rows=[(d,float(v)) for d,v in rows if v and float(v)>0]
+    return rows[-days:]
+
+def asset_chart_payload(symbol, asset_type="equity", days=180):
+    symbol=str(symbol or "").upper().strip()
+    if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("Invalid ticker symbol.")
+    days=min((30,90,180,365,500,750,1000),key=lambda k:abs(k-int(days)))
+    cache_key=(symbol,asset_type,days)
+    cached=ASSET_CHART_CACHE.get(cache_key)
+    if cached and time.time()-cached[0]<45: return dict(cached[1])
+    if asset_type=="index":
+        if symbol not in ASSET_INDEX_SERIES: raise ValueError("Unsupported index. Choose one of the listed FRED indices.")
+        rows=_fred_series_all(ASSET_INDEX_SERIES[symbol],days)
+        source="FRED daily observations"
+        # FRED index observations are closes only; do not manufacture OHLC candles.
+        dates=[d for d,v in rows]; closes=[float(v) for d,v in rows]
+        candles=[]
+        intraday=[]
+        live={"connected":False,"symbol":symbol,"freshness":"CLOSED","error":"FRED index observations are daily, not a real-time exchange feed."}
+    else:
+        if not (MARKET_API_KEY and MARKET_API_SECRET): raise RuntimeError("Configure ALPACA_API_KEY and ALPACA_API_SECRET to load individual securities.")
+        # Verify the symbol is part of the current Alpaca active equity directory.
+        universe=asset_universe_payload()
+        if symbol not in {a["symbol"] for a in universe["equities"]}:
+            raise ValueError("Ticker is not present in Alpaca's active tradable equity directory.")
+        start=(datetime.now(timezone.utc)-timedelta(days=max(730,days*2))).strftime("%Y-%m-%dT%H:%M:%SZ")
+        base="https://data.alpaca.markets/v2/stocks/"+symbol+"/bars?"
+        headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"}
+        req=Request(base+"timeframe=1Day&adjustment=all&feed=iex&sort=asc&limit=1000&start="+start,headers=headers)
+        with urlopen(req,timeout=20) as response: raw=json.loads(response.read())
+        bars=raw.get("bars") or []
+        candles=[]
+        for b in bars:
+            try:
+                c={"d":b["t"][:10],"o":float(b["o"]),"h":float(b["h"]),"l":float(b["l"]),"c":float(b["c"]),"v":float(b.get("v",0))}
+                if c["o"]>0 and c["h"]>=max(c["o"],c["c"]) and c["l"]<=min(c["o"],c["c"]): candles.append(c)
+            except (KeyError,TypeError,ValueError): continue
+        candles=candles[-days:]
+        dates=[c["d"] for c in candles]; closes=[c["c"] for c in candles]
+        intraday=[]
+        try:
+            end=datetime.now(timezone.utc); st=end-timedelta(days=2)
+            murl=base+"timeframe=1Min&adjustment=raw&feed=iex&sort=asc&limit=1000&start="+st.strftime("%Y-%m-%dT%H:%M:%SZ")+"&end="+end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            with urlopen(Request(murl,headers=headers),timeout=12) as response: mraw=json.loads(response.read())
+            for b in mraw.get("bars") or []:
+                try: intraday.append({"t":b["t"],"o":float(b["o"]),"h":float(b["h"]),"l":float(b["l"]),"c":float(b["c"]),"v":float(b.get("v",0))})
+                except (KeyError,TypeError,ValueError): continue
+        except Exception: intraday=[]
+        source="Alpaca IEX daily bars"
+        latest=candles[-1]["c"] if candles else None
+        last_minute=intraday[-1]["c"] if intraday else None
+        live={"connected":bool(last_minute is not None),"symbol":symbol,"last":last_minute,
+            "freshness":"RECENT" if last_minute is not None else "CLOSED",
+            "provider":"Alpaca IEX 1-minute bars" if last_minute is not None else "Alpaca IEX daily bars",
+            "error":None if last_minute is not None else "No recent one-minute bar is available."}
+    if len(closes)<30: raise RuntimeError("Insufficient historical observations for meaningful diagnostics.")
+    # The NDX neural/risk model is only valid for the NDX training series.
+    is_ndx=(asset_type=="index" and symbol=="NASDAQ100")
+    brain=brain_load() if is_ndx else None
+    if is_ndx:
+        verdict=chart_fast_verdict(dates,closes,brain)
+        if brain is not None: _record_ndx_prediction(dates,closes,verdict)
+        model_scope="Nasdaq-100 neural downside-risk model; symbol-specific models are not substituted."
+    else:
+        am=_asset_model(symbol)
+        latest_run=_latest_asset_run(symbol) if am is None else None
+        probability=_asset_model_probability(am,dates,closes) if am else None
+        if am and probability is not None and am.get("status")=="champion":
+            try: _record_asset_prediction(symbol,dates,closes,am,probability)
+            except Exception: pass
+            threshold=float(am.get("threshold",.5)); alarm=probability>=threshold
+            verdict={"verdict":"HOLD" if alarm else "NO CALL","confidence":"Calibrated risk estimate" if am.get("holdout",{}).get("brier") is not None else "Unverified","interim":False,"decision_status":"DOWNSIDE_RISK_ALARM" if alarm else "RISK_BELOW_THRESHOLD_NO_DIRECTIONAL_CALL","risk_score":probability,"alarm_level":threshold,"risk_alarm_active":alarm,"decision_reason":"Symbol-specific 21-session downside-risk estimate. This estimates an 8% drawdown event, not price direction or expected return.","model_version":am.get("version"),"model_scope":"Symbol-specific logistic risk model; validation and holdout details available in governance."}
+            model_scope="Symbol-specific 21-session downside-risk model; not a directional forecast."
+        else:
+            reason=(latest_run.get("promotion_reason") if latest_run else "No symbol-specific model has completed chronological training and untouched holdout evaluation.")
+            verdict={"verdict":"NO VALIDATED CALL","confidence":"N/A","interim":True,"decision_status":"CHALLENGER_NOT_PROMOTED" if latest_run else "SYMBOL_MODEL_NOT_TRAINED","decision_reason":reason,"risk_score":None,"alarm_level":None,"risk_alarm_active":None,"fusion":{"available":False,"reason":"No promoted symbol-specific model is available."}}
+            model_scope="Challenger model not promoted; previous champion retained and no unvalidated probability is served." if latest_run else "No validated neural forecast for this instrument. Train a symbol-specific risk model before displaying a risk probability."
+    q=chart_quantitative_intelligence(dates,closes)
+    payload={"symbol":symbol,"instrument_type":asset_type,"chart_instrument":symbol,
+        "chart_source":source,"dates":dates,"closes":[round(x,4) for x in closes],
+        "candles":candles,"intraday_candles":intraday,"intraday_status":{"status":"available" if intraday else "not available for this feed","bars":len(intraday)},
+        "as_of":dates[-1],"live":live,"verdict":verdict,
+        "quantitative_intelligence":q,"model_scope":model_scope,"symbol_model":_asset_model(symbol) if not is_ndx else None,
+        "feature_drift":_asset_model_drift(am,dates,closes) if (not is_ndx and am) else {"available":False,"status":"no promoted symbol model"},
+        "data_note":source+"; no synthetic candles. Data availability depends on provider entitlements."}
+    ASSET_CHART_CACHE[cache_key]=(time.time(),payload)
+    return payload
+
+
+# -----------------------------------------------------------------------------
+# MIRA Intelligence Workspace v1
+# Evidence, portfolio risk, symbol-specific models and model governance.
+# Every data item carries source/as-of metadata; unavailable providers stay absent.
+# -----------------------------------------------------------------------------
+import hashlib
+import statistics
+
+INTEL_DB = DATA_DIR / "mira_intelligence.sqlite3"
+SEC_UA = os.environ.get("MIRA_SEC_USER_AGENT", "").strip()
+FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
+
+# Supabase is the durable cloud backup for MIRA's intelligence workspace database.
+# The secret key is read only by this Python process and is never sent to the browser.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SECRET_KEY = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY") or "").strip()
+SUPABASE_BUCKET = "mira-private-state"
+_SUPABASE_SYNC_LOCK = threading.RLock()
+_SUPABASE_RESTORE_DONE = False
+_SUPABASE_FILE_RESTORED = set()
+_SUPABASE_SYNC_STATUS = {"configured": bool(SUPABASE_URL and SUPABASE_SECRET_KEY), "restored": False, "last_backup": None, "error": None}
+_SUPABASE_SYNCING = threading.local()
+
+def _supabase_storage_request(method, object_path, data=None):
+    if not (SUPABASE_URL and SUPABASE_SECRET_KEY):
+        raise RuntimeError("Supabase persistence is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the hosting environment.")
+    from urllib.parse import quote
+    url=SUPABASE_URL+"/storage/v1/object/"+SUPABASE_BUCKET+"/"+quote(object_path, safe="/")
+    headers={"apikey":SUPABASE_SECRET_KEY,"Authorization":"Bearer "+SUPABASE_SECRET_KEY,"Content-Type":"application/octet-stream"}
+    if method.upper()=="POST": headers["x-upsert"]="true"
+    req=Request(url,data=data,headers=headers,method=method.upper())
+    try:
+        with urlopen(req,timeout=25) as response: return response.read()
+    except HTTPError as exc:
+        detail=exc.read(500).decode("utf-8","replace")
+        if exc.code==404 and method.upper()=="GET": return None
+        raise RuntimeError("Supabase Storage returned HTTP "+str(exc.code)+": "+detail[:250]) from exc
+
+def _supabase_restore_intel_db():
+    global _SUPABASE_RESTORE_DONE
+    with _SUPABASE_SYNC_LOCK:
+        if _SUPABASE_RESTORE_DONE: return
+        _SUPABASE_RESTORE_DONE=True
+        if not (SUPABASE_URL and SUPABASE_SECRET_KEY): return
+        try:
+            blob=_supabase_storage_request("GET","mira_intelligence.sqlite3")
+            if blob:
+                INTEL_DB.parent.mkdir(parents=True,exist_ok=True)
+                tmp=INTEL_DB.with_suffix(".restore.tmp")
+                tmp.write_bytes(blob)
+                # Validate the SQLite image before replacing the local cache.
+                check=sqlite3.connect(str(tmp)); check.execute("PRAGMA quick_check").fetchone(); check.close()
+                tmp.replace(INTEL_DB)
+                _SUPABASE_SYNC_STATUS["restored"]=True
+            elif INTEL_DB.exists() and INTEL_DB.stat().st_size>0:
+                _SUPABASE_SYNC_STATUS["restored"]=True
+        except Exception as exc:
+            _SUPABASE_SYNC_STATUS["error"]="Restore failed: "+str(exc)[:220]
+
+def _supabase_backup_intel_db():
+    if not (SUPABASE_URL and SUPABASE_SECRET_KEY) or getattr(_SUPABASE_SYNCING,"active",False): return
+    if not INTEL_DB.exists() or INTEL_DB.stat().st_size==0: return
+    with _SUPABASE_SYNC_LOCK:
+        _SUPABASE_SYNCING.active=True
+        temp=INTEL_DB.with_suffix(".backup.tmp")
+        try:
+            src=sqlite3.connect(str(INTEL_DB),timeout=15)
+            dst=sqlite3.connect(str(temp),timeout=15)
+            try: src.backup(dst)
+            finally: dst.close(); src.close()
+            _supabase_storage_request("POST","mira_intelligence.sqlite3",temp.read_bytes())
+            _SUPABASE_SYNC_STATUS.update({"last_backup":datetime.now(timezone.utc).isoformat(timespec="seconds"),"error":None})
+        except Exception as exc:
+            _SUPABASE_SYNC_STATUS["error"]="Backup failed: "+str(exc)[:220]
+        finally:
+            temp.unlink(missing_ok=True)
+            _SUPABASE_SYNCING.active=False
+
+def _supabase_restore_file(local_path, object_name):
+    """Restore the latest durable MIRA data/model file once per process, preferring the cloud copy."""
+    local_path=Path(local_path)
+    if object_name in _SUPABASE_FILE_RESTORED or not (SUPABASE_URL and SUPABASE_SECRET_KEY): return
+    _SUPABASE_FILE_RESTORED.add(object_name)
+    try:
+        blob=_supabase_storage_request("GET",object_name)
+        if blob is not None:
+            local_path.parent.mkdir(parents=True,exist_ok=True)
+            tmp=local_path.with_suffix(local_path.suffix+".restore.tmp")
+            tmp.write_bytes(blob); tmp.replace(local_path)
+    except Exception as exc:
+        _SUPABASE_FILE_RESTORED.discard(object_name)
+        _SUPABASE_SYNC_STATUS["error"]="File restore failed: "+str(exc)[:200]
+
+def _supabase_backup_file(local_path, object_name):
+    local_path=Path(local_path)
+    if not local_path.is_file() or not (SUPABASE_URL and SUPABASE_SECRET_KEY): return
+    try:
+        _supabase_storage_request("POST",object_name,local_path.read_bytes())
+        _SUPABASE_SYNC_STATUS.update({"last_backup":datetime.now(timezone.utc).isoformat(timespec="seconds"),"error":None})
+    except Exception as exc:
+        _SUPABASE_SYNC_STATUS["error"]="File backup failed: "+str(exc)[:200]
+
+class _MiraSQLiteConnection(sqlite3.Connection):
+    def commit(self):
+        super().commit()
+        # Synchronous backup means a successful local commit is immediately mirrored remotely.
+        _supabase_backup_intel_db()
+
+def intel_db():
+    INTEL_DB.parent.mkdir(parents=True, exist_ok=True)
+    _supabase_restore_intel_db()
+    db=sqlite3.connect(INTEL_DB, timeout=15, factory=_MiraSQLiteConnection)
+    db.row_factory=sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS theses (
+      id TEXT PRIMARY KEY, workspace TEXT NOT NULL, symbol TEXT NOT NULL,
+      title TEXT NOT NULL, thesis TEXT NOT NULL, assumptions TEXT NOT NULL,
+      invalidation TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS theses_workspace ON theses(workspace, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS thesis_evidence (
+      workspace TEXT NOT NULL, thesis_id TEXT NOT NULL, symbol TEXT NOT NULL,
+      fetched_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+      PRIMARY KEY(workspace,thesis_id)
+    );
+    CREATE INDEX IF NOT EXISTS thesis_evidence_symbol ON thesis_evidence(workspace,symbol,fetched_at DESC);
+    CREATE TABLE IF NOT EXISTS portfolios (
+      workspace TEXT NOT NULL, symbol TEXT NOT NULL, quantity REAL NOT NULL,
+      updated_at TEXT NOT NULL, PRIMARY KEY(workspace,symbol)
+    );
+    CREATE TABLE IF NOT EXISTS asset_models (
+      symbol TEXT PRIMARY KEY, instrument_type TEXT NOT NULL, model_json TEXT NOT NULL,
+      created_at TEXT NOT NULL, data_as_of TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS asset_model_runs (
+      run_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, status TEXT NOT NULL,
+      model_json TEXT NOT NULL, created_at TEXT NOT NULL, data_as_of TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS asset_model_runs_symbol ON asset_model_runs(symbol,created_at DESC);
+    CREATE TABLE IF NOT EXISTS prediction_ledger (
+      id TEXT PRIMARY KEY, symbol TEXT NOT NULL, as_of TEXT NOT NULL,
+      model_version TEXT NOT NULL, probability REAL NOT NULL, threshold REAL NOT NULL,
+      horizon INTEGER NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL,
+      outcome INTEGER, graded_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS prediction_due ON prediction_ledger(symbol,as_of,horizon,outcome);
+    CREATE TABLE IF NOT EXISTS learning_events (
+      event_id TEXT PRIMARY KEY, source TEXT NOT NULL, symbol TEXT NOT NULL DEFAULT '',
+      event_type TEXT NOT NULL, observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS learning_events_recent ON learning_events(observed_at DESC);
+    CREATE INDEX IF NOT EXISTS learning_events_source ON learning_events(source,observed_at DESC);
+    """)
+    return db
+
+
+def record_learning_event(source, event_type, symbol="", payload=None, observed_at=None):
+    """Persist a deduplicated, source-attributed observation. This is memory/feature evidence, not automatically a supervised label."""
+    try:
+        stamp=observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        body=json.dumps(payload or {},sort_keys=True,separators=(",",":"),ensure_ascii=False,default=str)
+        if len(body)>60000: body=body[:60000]
+        digest=hashlib.sha256((str(source)+"|"+str(event_type)+"|"+str(symbol)+"|"+body).encode("utf-8")).hexdigest()
+        db=intel_db()
+        try:
+            db.execute("INSERT OR IGNORE INTO learning_events(event_id,source,symbol,event_type,observed_at,payload_json) VALUES(?,?,?,?,?,?)",(digest,str(source)[:40],str(symbol or "")[:20],str(event_type)[:60],stamp,body))
+            db.execute("DELETE FROM learning_events WHERE event_id IN (SELECT event_id FROM learning_events ORDER BY observed_at DESC LIMIT -1 OFFSET 12000)")
+            db.commit()
+        finally: db.close()
+        return digest
+    except Exception as exc:
+        try: visible_status("learning_memory","Could not persist an incoming learning event: "+str(exc)[:120])
+        except Exception: pass
+        return None
+
+
+LEARNING_RUNTIME={"last_supervisor_cycle":None,"cycles":0,"last_error":None}
+
+def learning_status_payload():
+    db=intel_db()
+    try:
+        total=db.execute("SELECT COUNT(*) FROM learning_events").fetchone()[0]
+        groups=[dict(r) for r in db.execute("SELECT source,COUNT(*) AS events,MAX(observed_at) AS last_seen FROM learning_events GROUP BY source ORDER BY last_seen DESC").fetchall()]
+        recent=[dict(r) for r in db.execute("SELECT source,symbol,event_type,observed_at FROM learning_events ORDER BY observed_at DESC LIMIT 8").fetchall()]
+        graded=db.execute("SELECT COUNT(*) FROM prediction_ledger WHERE outcome IS NOT NULL").fetchone()[0]
+        pending=db.execute("SELECT COUNT(*) FROM prediction_ledger WHERE outcome IS NULL").fetchone()[0]
+    finally: db.close()
+    brain=brain_load() or {}
+    return {"enabled":True,"event_memory":"supabase-backed SQLite snapshot" if _SUPABASE_SYNC_STATUS.get("configured") else "local SQLite (cloud filesystem may be ephemeral)","events_total":total,"sources":groups,"recent":recent,"predictions_graded":graded,"predictions_pending":pending,"model_trained_through":brain.get("trained_through"),"model_features":brain.get("features",[]),"training_running":bool(BRAIN_JOB.get("running")),"training_message":BRAIN_JOB.get("message"),"supervisor":dict(LEARNING_RUNTIME),"learning_policy":"New observations are retained and transformed into features; supervised model updates wait for matured labels and pass chronological validation. News/filings are evidence memory until a point-in-time labelled historical corpus is available.","continuous_compute_note":"Runs while the Render process is awake. Render Free may sleep/restart; this endpoint cannot guarantee 24/7 execution."}
+
+
+def _workspace(handler):
+    raw=(handler.headers.get("X-MIRA-Workspace") or "").strip()
+    if not re.fullmatch(r"[A-Fa-f0-9-]{32,36}",raw):
+        raise ValueError("A browser workspace ID is required.")
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _json_response(handler, payload, status=200):
+    body=json.dumps(payload,ensure_ascii=False,allow_nan=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type","application/json; charset=utf-8")
+    handler.send_header("Cache-Control","no-store")
+    handler.send_header("Content-Length",str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _safe_float(value, name, minimum=None):
+    try: x=float(value)
+    except (TypeError,ValueError): raise ValueError(name+" must be numeric.")
+    if not math.isfinite(x) or (minimum is not None and x<minimum): raise ValueError(name+" is outside its valid range.")
+    return x
+
+
+def _sec_get(url):
+    if not SEC_UA or "@" not in SEC_UA:
+        raise RuntimeError("SEC research is disabled until MIRA_SEC_USER_AGENT is configured with an identifying contact email.")
+    req=Request(url,headers={"User-Agent":SEC_UA,"Accept":"application/json"})
+    with urlopen(req,timeout=18) as response: return json.loads(response.read())
+
+
+SEC_TICKERS_CACHE={"at":0.0,"rows":None}
+def _sec_cik_for_symbol(symbol):
+    now=time.time()
+    if SEC_TICKERS_CACHE["rows"] is None or now-SEC_TICKERS_CACHE["at"]>86400:
+        raw=_sec_get("https://www.sec.gov/files/company_tickers.json")
+        rows={}
+        for v in raw.values():
+            t=str(v.get("ticker","")).upper()
+            if t: rows[t]={"cik":int(v["cik_str"]),"name":v.get("title",t)}
+        SEC_TICKERS_CACHE.update({"at":now,"rows":rows})
+    return SEC_TICKERS_CACHE["rows"].get(symbol)
+
+
+def _sec_company_research(symbol):
+    info=_sec_cik_for_symbol(symbol)
+    if not info: return {"available":False,"reason":"Ticker was not found in the SEC company ticker directory.","source":"SEC EDGAR"}
+    cik=str(info["cik"]).zfill(10)
+    facts=_sec_get("https://data.sec.gov/api/xbrl/companyfacts/CIK"+cik+".json")
+    submissions=_sec_get("https://data.sec.gov/submissions/CIK"+cik+".json")
+    us=facts.get("facts",{}).get("us-gaap",{})
+    def latest_fact(candidates):
+        for tag in candidates:
+            node=us.get(tag)
+            if not node: continue
+            units=node.get("units",{})
+            arr=units.get("USD") or units.get("shares") or units.get("USD/shares") or []
+            valid=[x for x in arr if x.get("form") in ("10-K","10-Q") and x.get("fy") and x.get("end")]
+            if valid:
+                valid.sort(key=lambda x:(x.get("end",""),x.get("filed","")))
+                x=valid[-1]
+                return {"value":x.get("val"),"unit":(next(iter(units),None)),"period_end":x.get("end"),"filed":x.get("filed"),"form":x.get("form"),"tag":tag}
+        return None
+    metrics={
+      "revenue":latest_fact(["RevenueFromContractWithCustomerExcludingAssessedTax","SalesRevenueNet","Revenues"]),
+      "net_income":latest_fact(["NetIncomeLoss"]),
+      "total_assets":latest_fact(["Assets"]),
+      "total_liabilities":latest_fact(["Liabilities"]),
+      "operating_cash_flow":latest_fact(["NetCashProvidedByUsedInOperatingActivities"]),
+      "cash_and_equivalents":latest_fact(["CashAndCashEquivalentsAtCarryingValue"])
+    }
+    rec=submissions.get("filings",{}).get("recent",{})
+    forms=rec.get("form",[]); dates=rec.get("filingDate",[]); accession=rec.get("accessionNumber",[]); docs=rec.get("primaryDocument",[]); report=rec.get("primaryDocDescription",[])
+    filings=[]
+    for i,form in enumerate(forms[:100]):
+        if form not in ("10-K","10-Q","8-K","20-F","6-K"): continue
+        acc=accession[i].replace("-","") if i<len(accession) else ""
+        doc=docs[i] if i<len(docs) else ""
+        if not acc or not doc: continue
+        filings.append({"form":form,"filed":dates[i] if i<len(dates) else None,"description":report[i] if i<len(report) else "SEC filing","url":f"https://www.sec.gov/Archives/edgar/data/{info['cik']}/{acc}/{doc}","source":"SEC EDGAR"})
+        if len(filings)>=15: break
+    return {"available":True,"symbol":symbol,"company":info["name"],"cik":info["cik"],"metrics":metrics,"filings":filings,"source":"SEC EDGAR Company Facts + Submissions","retrieved_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"note":"Latest reported facts can have different fiscal periods. Each value retains its own filing date and period end."}
+
+
+def _news_for_symbol(symbol):
+    if not FINNHUB_KEY:
+        return {"available":False,"items":[],"reason":"News provider not configured. Set FINNHUB_API_KEY; no headlines are fabricated.","source":None}
+    end=date.today(); start=end-timedelta(days=14)
+    url=f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={start.isoformat()}&to={end.isoformat()}&token={FINNHUB_KEY}"
+    req=Request(url,headers={"User-Agent":"MIRA-Research/1.0"})
+    with urlopen(req,timeout=12) as response: raw=json.loads(response.read())
+    items=[]
+    for x in raw[:30]:
+        items.append({"headline":str(x.get("headline",""))[:300],"summary":str(x.get("summary",""))[:800],"url":x.get("url"),"source":x.get("source"),"published_at":datetime.fromtimestamp(int(x.get("datetime",0)),timezone.utc).isoformat(timespec="seconds") if x.get("datetime") else None})
+    return {"available":True,"items":items,"source":"Finnhub company news","retrieved_at":datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
+def research_bundle(symbol):
+    symbol=str(symbol or "").upper().strip()
+    if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("Invalid ticker symbol.")
+    result={"symbol":symbol,"retrieved_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"fundamentals":{"available":False},"filings":{"available":False},"news":{"available":False},"macro":{"available":False}}
+    try:
+        sec=_sec_company_research(symbol); result["fundamentals"]={k:v for k,v in sec.items() if k not in ("filings",)}; result["filings"]={"available":sec.get("available",False),"items":sec.get("filings",[]),"source":sec.get("source"),"reason":sec.get("reason")}
+    except Exception as exc: result["fundamentals"]={"available":False,"reason":str(exc)[:220]}; result["filings"]={"available":False,"items":[],"reason":str(exc)[:220]}
+    try: result["news"]=_news_for_symbol(symbol)
+    except Exception as exc: result["news"]={"available":False,"items":[],"reason":"News provider request failed: "+str(exc)[:160]}
+    try:
+        # Use the already-cached FRED observations; never make a company-research page wait on three slow macro downloads.
+        cached=MACRO_CACHE.get("series",{}); observations={}
+        for name,pair in cached.items():
+            if pair and pair[0]: observations[name]={"date":pair[0][-1],"value":pair[1][-1]}
+        result["macro"]={"available":bool(observations),"observations":observations,"source":"FRED macro series","as_of":max((x["date"] for x in observations.values()),default=None),"reason":None if observations else "Macro series have not yet been loaded into this server process."}
+    except Exception as exc: result["macro"]={"available":False,"reason":str(exc)[:160]}
+    if result.get("news",{}).get("items"):
+        for item in result["news"]["items"]:
+            record_learning_event("finnhub_news","news_article",symbol,item,observed_at=item.get("published_at"))
+    if result.get("filings",{}).get("items"):
+        for item in result["filings"]["items"]:
+            record_learning_event("sec_edgar","sec_filing",symbol,item,observed_at=item.get("filed") or item.get("filing_date"))
+    if result.get("fundamentals",{}).get("available"):
+        record_learning_event("sec_edgar","fundamental_snapshot",symbol,result.get("fundamentals",{}))
+    return result
+
+
+def _returns_from_prices(prices):
+    return [math.log(prices[i]/prices[i-1]) for i in range(1,len(prices)) if prices[i]>0 and prices[i-1]>0]
+
+
+def _portfolio_payload(workspace):
+    db=intel_db()
+    try: holdings=[dict(r) for r in db.execute("SELECT symbol,quantity,updated_at FROM portfolios WHERE workspace=? ORDER BY symbol",(workspace,)).fetchall()]
+    finally: db.close()
+    if not holdings: return {"available":False,"holdings":[],"reason":"Add at least one holding with a positive quantity."}
+    series={}; names={}; failed=[]
+    for h in holdings:
+        sym=h["symbol"]
+        try:
+            if sym in ASSET_INDEX_SERIES:
+                failed.append({"symbol":sym,"reason":"FRED indices are research benchmarks, not tradable portfolio holdings. Use an ETF proxy instead."}); continue
+            d=asset_chart_payload(sym,"equity",500); dates=d["dates"]; vals=d["closes"]
+            series[sym]=dict(zip(dates,vals)); names[sym]=vals[-1]*h["quantity"] if vals else 0
+        except Exception as exc: failed.append({"symbol":sym,"reason":str(exc)[:140]})
+    usable=[s for s in series if len(series[s])>=31]
+    if not usable: return {"available":False,"holdings":holdings,"failed":failed,"reason":"No holding has sufficient aligned price history."}
+    common=sorted(set.intersection(*(set(series[s]) for s in usable)))
+    if len(common)<31: return {"available":False,"holdings":holdings,"failed":failed,"reason":"Insufficient common trading dates across holdings."}
+    values={s:[series[s][d] for d in common] for s in usable}; weights={s:names[s] for s in usable}; total=sum(weights.values())
+    if total<=0: return {"available":False,"holdings":holdings,"reason":"Portfolio market value is not positive."}
+    w={s:weights[s]/total for s in usable}; rets={s:_returns_from_prices(values[s]) for s in usable}; n=len(common)-1
+    port=[sum(w[s]*rets[s][i] for s in usable) for i in range(n)]
+    mu=sum(port)/n; vol=math.sqrt(sum((x-mu)**2 for x in port)/(n-1))*math.sqrt(252)
+    sorted_loss=sorted(port); qidx=max(0,int(.05*n)-1); var=max(0,-sorted_loss[qidx]); tail=[x for x in port if x<=sorted_loss[qidx]]; cvar=max(0,-sum(tail)/max(1,len(tail)))
+    peak=values[usable[0]][0]; curve=1.0; peak_curve=1.0; mdd=0.0
+    for r in port:
+        curve*=math.exp(r); peak_curve=max(peak_curve,curve); mdd=min(mdd,curve/peak_curve-1)
+    corr={}
+    for a in usable:
+        corr[a]={}
+        for b in usable:
+            ra,rb=rets[a],rets[b]; ma=sum(ra)/len(ra); mb=sum(rb)/len(rb)
+            den=math.sqrt(sum((x-ma)**2 for x in ra)*sum((y-mb)**2 for y in rb))
+            corr[a][b]=(sum((x-ma)*(y-mb) for x,y in zip(ra,rb))/den) if den else None
+    concentration={s:round(w[s],6) for s in usable}
+    # Broad-market beta proxy against the FRED S&P 500 series; not a commercial factor model.
+    factor_exposures={}; factor_dates=[]
+    try:
+        sp_rows=_fred_series_all("SP500",500); sp=dict(sp_rows); factor_dates=sorted(set(common)&set(sp))
+        if len(factor_dates)>=31:
+            market=_returns_from_prices([sp[d] for d in factor_dates]); mv=sum(market)/len(market); mvar=sum((x-mv)**2 for x in market)/max(1,len(market)-1)
+            for sym in usable:
+                own=_returns_from_prices([series[sym][d] for d in factor_dates]); ov=sum(own)/len(own)
+                cov=sum((x-ov)*(y-mv) for x,y in zip(own,market))/max(1,len(own)-1)
+                factor_exposures[sym]={"sp500_beta_proxy":cov/mvar if mvar>0 else None,"observations":len(own),"benchmark":"FRED S&P 500 daily close","note":"Single-factor historical beta proxy; not Barra or a multi-factor risk model."}
+    except Exception as exc: factor_exposures={"unavailable":{"reason":str(exc)[:120]}}
+    # Euler-style volatility contributions under the historical sample covariance matrix.
+    cov_matrix={}; contribution={}
+    for a0 in usable:
+        cov_matrix[a0]={}
+        for b0 in usable:
+            ra,rb=rets[a0],rets[b0]; ma=sum(ra)/len(ra); mb=sum(rb)/len(rb)
+            cov_matrix[a0][b0]=sum((x-ma)*(y-mb) for x,y in zip(ra,rb))/max(1,len(ra)-1)
+    port_daily_var=sum(w[a0]*w[b0]*cov_matrix[a0][b0] for a0 in usable for b0 in usable)
+    for a0 in usable:
+        marginal=sum(w[b0]*cov_matrix[a0][b0] for b0 in usable)
+        contribution[a0]=(w[a0]*marginal/port_daily_var) if port_daily_var>0 else None
+    stress={"parallel_market_shock_minus_5pct":-0.05,"parallel_market_shock_minus_10pct":-0.10,"historical_volatility_doubled_one_day":-vol/math.sqrt(252)}
+    return {"available":True,"as_of":common[-1],"observations":n,"holdings":[{"symbol":s,"quantity":next(x["quantity"] for x in holdings if x["symbol"]==s),"market_value_estimate":weights[s],"weight":w[s],"volatility_contribution_share":contribution[s]} for s in usable],"failed":failed,"annualized_volatility":vol,"historical_daily_var_95":var,"historical_daily_cvar_95":cvar,"max_drawdown":mdd,"correlation":corr,"concentration":concentration,"factor_exposures":factor_exposures,"stress_scenarios":stress,"method":"Equal timestamp intersection; close-to-close log returns; current weights held constant; historical 95% VaR/CVaR; Euler volatility contributions; S&P 500 single-factor beta proxy where available. No fees, taxes, slippage or intraday risk.","source":"FRED + Alpaca IEX daily bars"}
+
+
+def _workspace_theses(workspace):
+    db=intel_db()
+    try:
+        rows=[dict(r) for r in db.execute("SELECT * FROM theses WHERE workspace=? ORDER BY updated_at DESC",(workspace,)).fetchall()]
+        evidence={r["thesis_id"]:r["fetched_at"] for r in db.execute("SELECT thesis_id,fetched_at FROM thesis_evidence WHERE workspace=?",(workspace,)).fetchall()}
+    finally: db.close()
+    return {"items":[{**r,"assumptions":json.loads(r["assumptions"]),"invalidation":json.loads(r["invalidation"]),"last_evidence_check":evidence.get(r["id"])} for r in rows]}
+
+
+def _thesis_evidence(workspace, symbol):
+    db=intel_db()
+    try:
+        rows=db.execute("SELECT t.id,t.symbol,t.title,e.fetched_at,e.payload_json FROM theses t LEFT JOIN thesis_evidence e ON e.thesis_id=t.id AND e.workspace=t.workspace WHERE t.workspace=? AND t.symbol=? ORDER BY t.updated_at DESC",(workspace,symbol)).fetchall()
+    finally: db.close()
+    return {"symbol":symbol,"items":[{"id":r["id"],"symbol":r["symbol"],"title":r["title"],"fetched_at":r["fetched_at"],"evidence":json.loads(r["payload_json"]) if r["payload_json"] else None} for r in rows]}
+
+
+def thesis_monitor_loop():
+    """Refresh saved thesis evidence periodically; only configured providers can contribute evidence."""
+    while True:
+        time.sleep(60)
+        try:
+            db=intel_db()
+            try: targets=[dict(r) for r in db.execute("SELECT workspace,id,symbol FROM theses ORDER BY updated_at DESC LIMIT 100").fetchall()]
+            finally: db.close()
+            seen=set()
+            for row in targets:
+                key=(row["workspace"],row["symbol"])
+                if key in seen: continue
+                seen.add(key)
+                db=intel_db()
+                try:
+                    previous=db.execute("SELECT MAX(fetched_at) FROM thesis_evidence WHERE workspace=? AND symbol=?",key).fetchone()[0]
+                    prior_row=db.execute("SELECT payload_json FROM thesis_evidence WHERE workspace=? AND symbol=? ORDER BY fetched_at DESC LIMIT 1",key).fetchone()
+                finally: db.close()
+                if previous:
+                    try: age=(datetime.now(timezone.utc)-datetime.fromisoformat(previous)).total_seconds()
+                    except ValueError: age=999999
+                    if age<21600: continue
+                prior=json.loads(prior_row[0]) if prior_row else {}
+                payload=research_bundle(row["symbol"]); fetched=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                prior_urls={x.get("url") for x in ((prior.get("filings") or {}).get("items",[])+(prior.get("news") or {}).get("items",[])) if x.get("url")}
+                current=(payload.get("filings") or {}).get("items",[])+(payload.get("news") or {}).get("items",[])
+                payload["monitor_changes"]={"previous_scan":previous,"new_items":[x for x in current if x.get("url") and x.get("url") not in prior_urls],"checked_at":fetched}
+                for item in payload["monitor_changes"]["new_items"]:
+                    record_learning_event("thesis_monitor","new_thesis_evidence",row["symbol"],item,observed_at=item.get("published_at") or fetched)
+                db=intel_db()
+                try:
+                    for thesis in [x for x in targets if x["workspace"]==row["workspace"] and x["symbol"]==row["symbol"]]:
+                        db.execute("INSERT INTO thesis_evidence(workspace,thesis_id,symbol,fetched_at,payload_json) VALUES(?,?,?,?,?) ON CONFLICT(workspace,thesis_id) DO UPDATE SET symbol=excluded.symbol,fetched_at=excluded.fetched_at,payload_json=excluded.payload_json",(row["workspace"],thesis["id"],row["symbol"],fetched,json.dumps(payload)))
+                    db.commit()
+                finally: db.close()
+                time.sleep(.2)
+        except Exception as exc:
+            visible_status("thesis_monitor","Evidence refresh encountered a provider or storage error: "+str(exc)[:140])
+        time.sleep(21600)
+
+
+def macro_updater_loop():
+    while True:
+        try: refresh_macro(force=True)
+        except Exception: pass
+        time.sleep(21600)
+
+
+def _save_thesis(workspace,payload):
+    symbol=str(payload.get("symbol","")).upper().strip(); title=str(payload.get("title","")).strip(); thesis=str(payload.get("thesis","")).strip()
+    if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("A valid ticker symbol is required.")
+    if not title or len(title)>180 or not thesis or len(thesis)>4000: raise ValueError("Provide a title (max 180 characters) and thesis (max 4,000 characters).")
+    assumptions=payload.get("assumptions",[]); invalidation=payload.get("invalidation",[])
+    if not isinstance(assumptions,list) or not isinstance(invalidation,list) or len(assumptions)>20 or len(invalidation)>20: raise ValueError("Assumptions and invalidation conditions must be lists of at most 20 items.")
+    assumptions=[str(x).strip()[:500] for x in assumptions if str(x).strip()]; invalidation=[str(x).strip()[:500] for x in invalidation if str(x).strip()]
+    ident=str(payload.get("id") or __import__("uuid").uuid4()); now=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    db=intel_db()
+    try:
+        db.execute("INSERT INTO theses(id,workspace,symbol,title,thesis,assumptions,invalidation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET symbol=excluded.symbol,title=excluded.title,thesis=excluded.thesis,assumptions=excluded.assumptions,invalidation=excluded.invalidation,updated_at=excluded.updated_at WHERE theses.workspace=excluded.workspace",(ident,workspace,symbol,title,thesis,json.dumps(assumptions),json.dumps(invalidation),now,now)); db.commit()
+    finally: db.close()
+    return {"saved":True,"id":ident,"updated_at":now}
+
+
+def _train_asset_model(symbol, asset_type, dates, closes):
+    """Train symbol-specific downside-risk candidates; select by validation Brier, score once on holdout."""
+    if len(closes)<260: raise ValueError("At least 260 daily closes are required before training a symbol-specific model.")
+    rows=[]; labels=[]
+    for i in range(BRAIN_WARMUP,len(closes)-21):
+        hist=closes[:i+1]; ret=_returns_from_prices(hist)
+        if len(ret)<60: continue
+        def sd(a):
+            z=ret[-a:]; m=sum(z)/len(z); return math.sqrt(sum((v-m)**2 for v in z)/max(1,len(z)-1))
+        feat=[ret[-1],sum(ret[-5:]),sum(ret[-20:]),sum(ret[-60:]),sd(5),sd(20),hist[-1]/max(hist[-20:])-1,hist[-1]/(sum(hist[-20:])/20)-1]
+        future=closes[i+1:i+22]; y=int(min(future)/closes[i]-1<=-.08)
+        rows.append((dates[i],feat)); labels.append(y)
+    n=len(rows); a=int(n*.60); b=int(n*.80); gap=BRAIN_GAP
+    train_ids=list(range(0,max(0,a-gap))); valid_ids=list(range(a,max(a+50,b-gap))); test_ids=list(range(b,n))
+    if min(len(train_ids),len(valid_ids),len(test_ids))<30: raise ValueError("Not enough purged chronological observations for train/validation/test splits.")
+    dim=len(rows[0][1]); means=[sum(rows[i][1][j] for i in train_ids)/len(train_ids) for j in range(dim)]
+    scales=[math.sqrt(sum((rows[i][1][j]-means[j])**2 for i in train_ids)/len(train_ids)) or 1 for j in range(dim)]
+    X=[[max(-8,min(8,(r[j]-means[j])/scales[j])) for j in range(dim)] for _,r in rows]; y=labels
+    def sig(z): return 1/(1+math.exp(-max(-30,min(30,z))))
+    def score_brier(probs, ids): return sum((pp-y[i])**2 for pp,i in zip(probs,ids))/len(ids)
+    # Candidate A: L2-regularized logistic regression.
+    w=[0.0]*(dim+1); lr=.035; lam=.025
+    for ep in range(650):
+        grad=[0.0]*(dim+1)
+        for i in train_ids:
+            pp=sig(w[0]+sum(w[j+1]*X[i][j] for j in range(dim))); e=pp-y[i]
+            grad[0]+=e
+            for j in range(dim): grad[j+1]+=e*X[i][j]
+        for j in range(dim+1): w[j]-=lr*(grad[j]/len(train_ids)+(lam*w[j] if j else 0))
+        if ep%100==99: lr*=.92
+    logit=lambda i:w[0]+sum(w[j+1]*X[i][j] for j in range(dim))
+    # Candidate B: shallow gradient-boosted decision stumps, fitted only on training rows.
+    prevalence=min(.999,max(.001,sum(y[i] for i in train_ids)/len(train_ids)))
+    base=math.log(prevalence/(1-prevalence)); raw={i:base for i in train_ids+valid_ids+test_ids}; stumps=[]
+    for _ in range(60):
+        probs={i:sig(raw[i]) for i in train_ids}; residual={i:y[i]-probs[i] for i in train_ids}; best=None
+        for j in range(dim):
+            vals=sorted(set(X[i][j] for i in train_ids))
+            if len(vals)<3: continue
+            cuts=[(vals[int((len(vals)-1)*q)] + vals[min(len(vals)-1,int((len(vals)-1)*q)+1)])/2 for q in (.1,.2,.3,.4,.5,.6,.7,.8,.9)]
+            for cut in cuts:
+                left=[i for i in train_ids if X[i][j]<=cut]; right=[i for i in train_ids if X[i][j]>cut]
+                if len(left)<12 or len(right)<12: continue
+                sl=sum(residual[i] for i in left); sr=sum(residual[i] for i in right)
+                gain=sl*sl/(len(left)+5)+sr*sr/(len(right)+5)
+                if best is None or gain>best[0]: best=(gain,j,cut,.08*sl/(len(left)+5),.08*sr/(len(right)+5))
+        if best is None: break
+        _,j,cut,lv,rv=best; stumps.append({"feature":j,"threshold":cut,"left":lv,"right":rv})
+        for i in raw: raw[i]+=lv if X[i][j]<=cut else rv
+    def boost_logit(i): return base+sum(st["left"] if X[i][st["feature"]]<=st["threshold"] else st["right"] for st in stumps)
+    # Platt calibration is fitted on the validation block only for each candidate.
+    def calibrate(logits):
+        aa=0.0; bb=1.0
+        for _ in range(300):
+            ga=gb=0.0
+            for zz,yy in zip(logits,[y[i] for i in valid_ids]):
+                pp=sig(aa+bb*zz); ga+=pp-yy; gb+=(pp-yy)*zz
+            aa-=.025*ga/len(logits); bb-=.025*gb/len(logits)
+        return {"intercept":aa,"slope":bb}
+    cal_log=calibrate([logit(i) for i in valid_ids]); cal_boost=calibrate([boost_logit(i) for i in valid_ids])
+    val_log=[sig(cal_log["intercept"]+cal_log["slope"]*logit(i)) for i in valid_ids]
+    val_boost=[sig(cal_boost["intercept"]+cal_boost["slope"]*boost_logit(i)) for i in valid_ids]
+    candidates={"regularized_logistic":{"brier":score_brier(val_log,valid_ids)},"gradient_boosted_stumps":{"brier":score_brier(val_boost,valid_ids)}}
+    neural_model=None; neural_val=None; neural_hold=None
+    if len(closes)>=650:
+        try:
+            neural_model=train_brain(dates,closes,8,feature_names=BRAIN_FEATURES)
+            neural_model["trained_label_through"]=dates[-BRAIN_HORIZON-1]
+            nf,ny,nidx,ntrain,nvalid,nhold=brain_split(dates,closes)
+            nfeatures=[select_features(row,BRAIN_FEATURES) if row is not None else None for row in nf]
+            ev=neural_model["eval"]
+            nprob=brain_predict_ids(brain_ensemble(ev["members"]),ev["mean"],ev["scale"],nfeatures,nvalid)
+            hprob=brain_predict_ids(brain_ensemble(ev["members"]),ev["mean"],ev["scale"],nfeatures,nhold)
+            date_to_index={d:i for i,d in enumerate(dates)}
+            neural_valid_indices=[date_to_index[rows[i][0]] for i in valid_ids]
+            neural_test_indices=[date_to_index[rows[i][0]] for i in test_ids]
+            neural_val=[nprob[i] for i in neural_valid_indices if i in nprob]
+            neural_hold=[hprob[i] for i in neural_test_indices] if all(i in hprob for i in neural_test_indices) else None
+            if len(neural_val)==len(valid_ids) and neural_hold is not None and len(neural_hold)==len(test_ids):
+                candidates["neural_ensemble"]={"brier":score_brier(neural_val,valid_ids)}
+        except Exception as exc:
+            candidates["neural_ensemble"]={"available":False,"reason":"Neural candidate training failed: "+str(exc)[:140]}
+            neural_model=None; neural_val=None; neural_hold=None
+    selected=min(((v["brier"],k) for k,v in candidates.items() if v.get("brier") is not None),default=(float("inf"),"regularized_logistic"))[1]
+    if selected=="regularized_logistic":
+        model_core={"model_type":selected,"weights":w,"calibration":cal_log}; valps=val_log; holdps=[sig(cal_log["intercept"]+cal_log["slope"]*logit(i)) for i in test_ids]
+    elif selected=="gradient_boosted_stumps":
+        model_core={"model_type":selected,"base_logit":base,"stumps":stumps,"calibration":cal_boost}; valps=val_boost; holdps=[sig(cal_boost["intercept"]+cal_boost["slope"]*boost_logit(i)) for i in test_ids]
+    else:
+        model_core={"model_type":selected,"neural_model":neural_model}; valps=neural_val; holdps=neural_hold
+    ysval=[y[i] for i in valid_ids]
+    # Threshold selected on validation balanced accuracy, never on holdout.
+    best=(.5,-1)
+    for k in range(20,81,2):
+        th=k/100; tp=sum(1 for pp,yy in zip(valps,ysval) if pp>=th and yy); tn=sum(1 for pp,yy in zip(valps,ysval) if pp<th and not yy)
+        pos=sum(ysval); neg=len(ysval)-pos; score=(tp/pos+tn/neg)/2 if pos and neg else -1
+        if score>best[1]: best=(th,score)
+    ps=holdps; ys=[y[i] for i in test_ids]
+    brier=sum((pp-yy)**2 for pp,yy in zip(ps,ys))/len(ys)
+    ll=-sum(yy*math.log(max(1e-8,pp))+(1-yy)*math.log(max(1e-8,1-pp)) for pp,yy in zip(ps,ys))/len(ys)
+    auc=auc_score(ps,ys); auc_ci=auc_block_ci(ps,ys,block=21,n_boot=120,seed=31); holdout_rate=sum(ys)/len(ys); baseline_brier=holdout_rate*(1-holdout_rate)
+    predicted=[int(pp>=best[0]) for pp in ps]; tp=sum(1 for pp,yy in zip(predicted,ys) if pp and yy); fp=sum(1 for pp,yy in zip(predicted,ys) if pp and not yy); fn=sum(1 for pp,yy in zip(predicted,ys) if not pp and yy); tn=len(ys)-tp-fp-fn
+    precision=tp/(tp+fp) if tp+fp else None; recall=tp/(tp+fn) if tp+fn else None
+    promoted=(len(test_ids)>=100 and brier<baseline_brier and auc is not None and auc>.5 and auc_ci is not None and auc_ci[0]>.5)
+    model={"version":2,"symbol":symbol,"instrument_type":asset_type,"status":"champion" if promoted else "challenger_not_promoted","label":"forward 21-session maximum drawdown >= 8%","horizon":21,"features":["return_1d","momentum_5d","momentum_20d","momentum_60d","volatility_5d","volatility_20d","drawdown_20d","price_vs_sma20"],"means":means,"scales":scales,**model_core,"candidate_validation_brier":candidates,"selected_by":"lower validation Brier score","threshold":best[0],"trained_through":rows[train_ids[-1]][0],"validation_period":[rows[valid_ids[0]][0],rows[valid_ids[-1]][0]],"holdout_period":[rows[test_ids[0]][0],rows[test_ids[-1]][0]],"holdout":{"rows":len(test_ids),"positive_rate":holdout_rate,"brier":brier,"baseline_brier":baseline_brier,"log_loss":ll,"auc":auc,"auc_block_bootstrap_95ci":auc_ci,"precision":precision,"recall":recall,"false_positives":fp,"false_negatives":fn,"beats_constant_base_rate":brier<baseline_brier},"promotion_reason":"Passed untouched holdout: Brier beats constant-rate baseline and the 95% block-bootstrap AUC lower bound exceeds 0.50." if promoted else "Not promoted: the model must beat the constant-rate Brier baseline and have a 95% block-bootstrap AUC lower bound above 0.50 on at least 100 holdout rows. No risk probability will be served as a validated call.","purge_sessions":gap,"created_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"data_as_of":dates[-1],"limitations":"Single-symbol daily price-only downside classifier. Neural candidate is compared only when sufficient observations exist for non-overlapping purged splits; otherwise logistic and boosted-stump candidates are compared. No fundamentals/news/factor data in training. Holdout estimates may be noisy and are not evidence of profitable trading."}
+    db=intel_db(); run_id=__import__("uuid").uuid4().hex
+    try:
+        db.execute("INSERT INTO asset_model_runs(run_id,symbol,status,model_json,created_at,data_as_of) VALUES(?,?,?,?,?,?)",(run_id,symbol,model["status"],json.dumps(model),model["created_at"],dates[-1]))
+        # Failed challengers never overwrite an existing champion.
+        if promoted:
+            db.execute("INSERT INTO asset_models(symbol,instrument_type,model_json,created_at,data_as_of) VALUES(?,?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET instrument_type=excluded.instrument_type,model_json=excluded.model_json,created_at=excluded.created_at,data_as_of=excluded.data_as_of",(symbol,asset_type,json.dumps(model),model["created_at"],dates[-1]))
+        db.commit()
+    finally: db.close()
+    return model
+
+def _asset_model(symbol):
+    db=intel_db()
+    try: row=db.execute("SELECT model_json FROM asset_models WHERE symbol=?",(symbol,)).fetchone()
+    finally: db.close()
+    return json.loads(row[0]) if row else None
+
+
+def _latest_asset_run(symbol):
+    db=intel_db()
+    try: row=db.execute("SELECT model_json FROM asset_model_runs WHERE symbol=? ORDER BY created_at DESC LIMIT 1",(symbol,)).fetchone()
+    finally: db.close()
+    return json.loads(row[0]) if row else None
+
+
+def _asset_model_probability(model, dates, closes):
+    if len(closes)<61: return None
+    if model.get("model_type")=="neural_ensemble":
+        return brain_risk_now(model["neural_model"],dates,closes)
+    ret=_returns_from_prices(closes); hist=closes
+    def sd(a):
+        z=ret[-a:]; m=sum(z)/len(z); return math.sqrt(sum((v-m)**2 for v in z)/max(1,len(z)-1))
+    feat=[ret[-1],sum(ret[-5:]),sum(ret[-20:]),sum(ret[-60:]),sd(5),sd(20),hist[-1]/max(hist[-20:])-1,hist[-1]/(sum(hist[-20:])/20)-1]
+    x=[max(-8,min(8,(feat[j]-model["means"][j])/model["scales"][j])) for j in range(len(feat))]
+    if model.get("model_type")=="gradient_boosted_stumps":
+        z=model["base_logit"]+sum(st["left"] if x[st["feature"]]<=st["threshold"] else st["right"] for st in model.get("stumps",[]))
+    else: z=model["weights"][0]+sum(model["weights"][j+1]*x[j] for j in range(len(x)))
+    z=model["calibration"]["intercept"]+model["calibration"]["slope"]*z
+    return 1/(1+math.exp(-max(-30,min(30,z))))
+
+def _asset_model_drift(model, dates, closes):
+    if len(closes)<61: return {"available":False,"status":"insufficient history"}
+    if model.get("model_type")=="neural_ensemble":
+        row=brain_feature_rows(dates,closes)[-1]; feat=select_features(row,model["neural_model"].get("features",BRAIN_FEATURES)); means=model["neural_model"]["mean"]; scales=model["neural_model"]["scale"]
+    else:
+        ret=_returns_from_prices(closes)
+        def sd(a):
+            z=ret[-a:]; m=sum(z)/len(z); return math.sqrt(sum((v-m)**2 for v in z)/max(1,len(z)-1))
+        feat=[ret[-1],sum(ret[-5:]),sum(ret[-20:]),sum(ret[-60:]),sd(5),sd(20),closes[-1]/max(closes[-20:])-1,closes[-1]/(sum(closes[-20:])/20)-1]; means=model["means"]; scales=model["scales"]
+    z=[(feat[i]-means[i])/(scales[i] or 1) for i in range(len(feat))]
+    names=model.get("features",[])
+    flagged=[names[i] if i<len(names) else "feature_"+str(i) for i,v in enumerate(z) if abs(v)>=3]
+    return {"available":True,"max_abs_standardized_deviation":max(abs(v) for v in z),"features_beyond_3sd":flagged,"status":"review_required" if flagged else "within_3sd_screen","method":"Point-in-time standardized feature screen; not a formal population-stability test."}
+
+
+def _record_ndx_prediction(dates, closes, verdict):
+    if not dates or not closes or verdict.get("risk_score") is None: return
+    db=intel_db(); asof=dates[-1]; prob=float(verdict["risk_score"]); threshold=float(verdict.get("alarm_level") or .2)
+    ident="NDX:"+asof+":"+str(BRAIN_JOB.get("message",""))[:20]
+    try:
+        db.execute("INSERT OR IGNORE INTO prediction_ledger(id,symbol,as_of,model_version,probability,threshold,horizon,label,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(ident,"NASDAQ100",""+asof,"ndx-brain-v2",prob,threshold,BRAIN_HORIZON,"8pct_drawdown",datetime.now(timezone.utc).isoformat(timespec="seconds")))
+        # Grade only when the complete future horizon is present in the official close series.
+        rows=db.execute("SELECT id,as_of,horizon FROM prediction_ledger WHERE symbol='NASDAQ100' AND outcome IS NULL").fetchall(); pos={d:i for i,d in enumerate(dates)}
+        for row in rows:
+            i=pos.get(row["as_of"])
+            if i is not None and i+int(row["horizon"])<len(closes):
+                outcome=int(min(closes[i+1:i+int(row["horizon"])+1])/closes[i]-1<=-BRAIN_DROP)
+                db.execute("UPDATE prediction_ledger SET outcome=?,graded_at=? WHERE id=?",(outcome,datetime.now(timezone.utc).isoformat(timespec="seconds"),row["id"]))
+        db.commit()
+        record_learning_event("prediction_ledger","risk_forecast","NASDAQ100",{"as_of":asof,"probability":prob,"threshold":threshold,"horizon":BRAIN_HORIZON,"label":"8pct_drawdown"},observed_at=asof+"T23:59:00+00:00")
+        graded_now=db.execute("SELECT COUNT(*) FROM prediction_ledger WHERE symbol='NASDAQ100' AND graded_at>=?",(datetime.now(timezone.utc).date().isoformat(),)).fetchone()[0]
+        if graded_now: record_learning_event("prediction_ledger","matured_outcomes","NASDAQ100",{"graded_today":graded_now})
+    finally: db.close()
+
+
+def _record_asset_prediction(symbol, dates, closes, model, probability):
+    if not dates or probability is None: return
+    ident=symbol+":"+dates[-1]+":"+str(model.get("created_at",""))
+    db=intel_db()
+    try:
+        db.execute("INSERT OR IGNORE INTO prediction_ledger(id,symbol,as_of,model_version,probability,threshold,horizon,label,created_at) VALUES(?,?,?,?,?,?,?,?,?)",(ident,symbol,dates[-1],"asset-model-v"+str(model.get("version",1)),float(probability),float(model.get("threshold",.5)),21,"8pct_drawdown",datetime.now(timezone.utc).isoformat(timespec="seconds")))
+        rows=db.execute("SELECT id,as_of,horizon FROM prediction_ledger WHERE symbol=? AND outcome IS NULL",(symbol,)).fetchall(); pos={d:i for i,d in enumerate(dates)}
+        for row in rows:
+            i=pos.get(row["as_of"])
+            if i is not None and i+int(row["horizon"])<len(closes):
+                outcome=int(min(closes[i+1:i+int(row["horizon"])+1])/closes[i]-1<=-.08)
+                db.execute("UPDATE prediction_ledger SET outcome=?,graded_at=? WHERE id=?",(outcome,datetime.now(timezone.utc).isoformat(timespec="seconds"),row["id"]))
+        db.commit()
+        record_learning_event("prediction_ledger","asset_risk_forecast",symbol,{"as_of":dates[-1],"probability":float(probability),"threshold":float(model.get("threshold",.5)),"horizon":21,"label":"8pct_drawdown"},observed_at=dates[-1]+"T23:59:00+00:00")
+    finally: db.close()
+
+
+def _governance_payload():
+    db=intel_db()
+    try:
+        rows=[dict(r) for r in db.execute("SELECT * FROM prediction_ledger ORDER BY as_of DESC LIMIT 1000").fetchall()]
+        models=[dict(r) for r in db.execute("SELECT symbol,instrument_type,created_at,data_as_of,model_json FROM asset_models ORDER BY symbol").fetchall()]
+        runs=[dict(r) for r in db.execute("SELECT symbol,status,created_at,data_as_of,model_json FROM asset_model_runs ORDER BY created_at DESC LIMIT 100").fetchall()]
+    finally: db.close()
+    graded=[r for r in rows if r["outcome"] is not None]
+    brier=sum((r["probability"]-r["outcome"])**2 for r in graded)/len(graded) if graded else None
+    logloss=-sum(r["outcome"]*math.log(max(1e-8,r["probability"]))+(1-r["outcome"])*math.log(max(1e-8,1-r["probability"])) for r in graded)/len(graded) if graded else None
+    bins=[]
+    for lo in (0,.2,.4,.6,.8):
+        subset=[r for r in graded if lo<=r["probability"]<lo+.2]
+        bins.append({"range":[lo,lo+.2],"count":len(subset),"mean_probability":sum(r["probability"] for r in subset)/len(subset) if subset else None,"observed_rate":sum(r["outcome"] for r in subset)/len(subset) if subset else None})
+    return {"predictions_recorded":len(rows),"predictions_graded":len(graded),"brier":brier,"log_loss":logloss,"calibration_bins":bins,"asset_models":[{"symbol":m["symbol"],"instrument_type":m["instrument_type"],"status":"champion","created_at":m["created_at"],"data_as_of":m["data_as_of"],"holdout":json.loads(m["model_json"]).get("holdout"),"holdout_period":json.loads(m["model_json"]).get("holdout_period")} for m in models],"challenger_runs":[{"symbol":m["symbol"],"status":m["status"],"created_at":m["created_at"],"data_as_of":m["data_as_of"],"holdout":json.loads(m["model_json"]).get("holdout"),"promotion_reason":json.loads(m["model_json"]).get("promotion_reason")} for m in runs],"champion_policy":"A challenger is stored only after a chronological, purged holdout report is created. This release does not auto-promote challengers based on in-sample scores.","note":"Metrics are unavailable until sufficient predictions mature. Historical model holdout metrics are reported separately from prospective live-ledger metrics."}
+
+
+def _portfolio_save(workspace, holdings):
+    if not isinstance(holdings,list) or len(holdings)>50: raise ValueError("Holdings must be a list of at most 50 symbols.")
+    clean={}
+    for h in holdings:
+        sym=str(h.get("symbol","")).upper().strip()
+        if not re.fullmatch(r"[A-Z0-9.-]{1,12}",sym): raise ValueError("Invalid portfolio ticker: "+sym)
+        qty=_safe_float(h.get("quantity"),"Quantity",0)
+        if qty<=0: raise ValueError("Holding quantity must be greater than zero.")
+        clean[sym]=qty
+    db=intel_db(); now=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        db.execute("DELETE FROM portfolios WHERE workspace=?",(workspace,))
+        db.executemany("INSERT INTO portfolios(workspace,symbol,quantity,updated_at) VALUES(?,?,?,?)",[(workspace,s,q,now) for s,q in clean.items()]); db.commit()
+    finally: db.close()
+    return {"saved":True,"holdings":len(clean),"updated_at":now}
+
 
 CHAT_RATE={}
 ADMIN_TOKEN=os.environ.get("MIRA_ADMIN_TOKEN","").strip()
@@ -2095,6 +3014,53 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc: body=json.dumps({"facts":"","error":str(exc)[:150]}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
+        if path=="/api/health":
+            body=json.dumps({"ok":True,"server_time":datetime.now(timezone.utc).isoformat(timespec="seconds"),"service":"MIRA API","persistence":{"provider":"supabase_storage_backup","configured":_SUPABASE_SYNC_STATUS["configured"],"restored":_SUPABASE_SYNC_STATUS["restored"],"last_backup":_SUPABASE_SYNC_STATUS["last_backup"],"error":_SUPABASE_SYNC_STATUS["error"]}}).encode()
+            self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+            return
+        if path=="/api/universe":
+            try: body=json.dumps(asset_universe_payload()).encode()
+            except Exception as exc: body=json.dumps({"indices":[],"equities":[],"error":str(exc)[:160]}).encode()
+            self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+            return
+        if path=="/api/asset-chart":
+            try:
+                q=dict(p.split("=",1) for p in urlsplit(self.path).query.split("&") if "=" in p)
+                sym=q.get("symbol",""); typ=q.get("type","equity"); days=int(q.get("days","180"))
+                body=json.dumps(asset_chart_payload(sym,typ,days)).encode()
+                status=200
+            except Exception as exc:
+                body=json.dumps({"error":str(exc)[:200]}).encode(); status=400
+            self.send_response(status);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+            return
+        if path=="/api/research":
+            try:
+                q=dict(p.split("=",1) for p in urlsplit(self.path).query.split("&") if "=" in p)
+                _json_response(self,research_bundle(q.get("symbol","")))
+            except Exception as exc: _json_response(self,{"error":str(exc)[:240]},400)
+            return
+        if path=="/api/theses":
+            try: _json_response(self,_workspace_theses(_workspace(self)))
+            except Exception as exc: _json_response(self,{"error":str(exc)[:180]},400)
+            return
+        if path=="/api/thesis-evidence":
+            try:
+                q=dict(p.split("=",1) for p in urlsplit(self.path).query.split("&") if "=" in p)
+                _json_response(self,_thesis_evidence(_workspace(self),str(q.get("symbol","")).upper()))
+            except Exception as exc: _json_response(self,{"error":str(exc)[:180]},400)
+            return
+        if path=="/api/portfolio":
+            try: _json_response(self,_portfolio_payload(_workspace(self)))
+            except Exception as exc: _json_response(self,{"error":str(exc)[:180]},400)
+            return
+        if path=="/api/governance":
+            try: _json_response(self,_governance_payload())
+            except Exception as exc: _json_response(self,{"error":str(exc)[:180]},500)
+            return
+        if path=="/api/learning":
+            try: _json_response(self,learning_status_payload())
+            except Exception as exc: _json_response(self,{"error":str(exc)[:180]},500)
+            return
         if path=="/api/chart":
             try:
                 q=dict(p.split("=",1) for p in urlsplit(self.path).query.split("&") if "=" in p)
@@ -2118,7 +3084,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         if path=="/api/status":
-            body=json.dumps(ENGINE_STATUS).encode()
+            body=json.dumps({**ENGINE_STATUS,"learning":{"enabled":True,"training_running":bool(BRAIN_JOB.get("running")),"training_message":BRAIN_JOB.get("message"),"trained_through":(brain_load() or {}).get("trained_through"),"last_official_close":PRICE_STATE.get("last_csv_date")},"persistence":{"provider":"supabase_storage_backup","configured":_SUPABASE_SYNC_STATUS["configured"],"restored":_SUPABASE_SYNC_STATUS["restored"],"last_backup":_SUPABASE_SYNC_STATUS["last_backup"],"error":_SUPABASE_SYNC_STATUS["error"]}}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
             return
         super().do_GET()
@@ -2130,10 +3096,33 @@ class Handler(SimpleHTTPRequestHandler):
             payload=json.loads(self.rfile.read(length))
             path=urlsplit(self.path).path
             if is_public_request(self):
-                # Visitors on the public internet (tunnel / cloud host) may only chat. Keys, training and retraining are owner-only (use localhost).
-                if path!="/api/agent": raise PermissionError("This control is only available on the owner's own computer.")
-                if not chat_rate_ok(self): raise PermissionError("Too many questions in a minute; please wait a little and ask again.")
-            if path=="/api/market-data/config":
+                # Workspace records are isolated by a random browser workspace ID; credentials and model training remain owner-only.
+                if path not in ("/api/agent","/api/theses","/api/portfolio","/api/model/train"):
+                    raise PermissionError("This control is only available on the owner's own computer.")
+                if path=="/api/agent" and not chat_rate_ok(self): raise PermissionError("Too many questions in a minute; please wait a little and ask again.")
+                if path in ("/api/theses","/api/portfolio") and not rate_ok(self,"workspace-write",20): raise PermissionError("Workspace write limit reached. Please wait a minute.")
+                if path=="/api/model/train" and not rate_ok(self,"model-train",1): raise PermissionError("Model training is limited to one run per visitor per minute.")
+            if path=="/api/theses":
+                ws=_workspace(self)
+                if payload.get("delete_id"):
+                    db=intel_db()
+                    try:
+                        db.execute("DELETE FROM thesis_evidence WHERE thesis_id=? AND workspace=?",(str(payload["delete_id"]),ws))
+                        db.execute("DELETE FROM theses WHERE id=? AND workspace=?",(str(payload["delete_id"]),ws)); db.commit()
+                    finally: db.close()
+                    result={"deleted":True}
+                else: result=_save_thesis(ws,payload)
+            elif path=="/api/portfolio": result=_portfolio_save(_workspace(self),payload.get("holdings",[]))
+            elif path=="/api/model/train":
+                symbol=str(payload.get("symbol","")).upper(); typ=str(payload.get("type","equity"))
+                if typ=="index":
+                    if symbol not in ASSET_INDEX_SERIES: raise ValueError("Unsupported index.")
+                    if symbol=="NASDAQ100": raise ValueError("Nasdaq-100 already has its own neural risk brain. Use the existing brain retraining workflow instead of creating a duplicate asset model.")
+                    rows=_fred_series_all(ASSET_INDEX_SERIES[symbol],1000); dates=[x[0] for x in rows]; closes=[x[1] for x in rows]
+                else:
+                    d=asset_chart_payload(symbol,"equity",1000); dates=d["dates"]; closes=d["closes"]
+                result={"trained":True,"model":_train_asset_model(symbol,typ,dates,closes)}
+            elif path=="/api/market-data/config":
                 key=str(payload.get("key","")).strip(); secret=str(payload.get("secret","")).strip()
                 if payload.get("clear") is True:
                     MARKET_API_KEY=MARKET_API_SECRET=""; MARKET_CACHE={"at":0.0,"data":None}; clear_market_credentials()
@@ -2196,14 +3185,23 @@ if __name__=="__main__":
     except Exception as exc: print("Could not start brain training:",exc)
     threading.Thread(target=price_updater_loop,daemon=True).start(); print("Live price updater started: official closes every 30 min (5 min while the market is open).")
     threading.Thread(target=paper_watch_loop,daemon=True).start(); print("Paper take-profit/stop-loss watcher started: checks every 5 seconds while the market is open.")
-    def keepalive_loop():
-        # Free cloud hosts put idle servers to sleep, which stops learning. Visiting our own public address every 10 minutes keeps it awake.
-        url=os.environ.get("RENDER_EXTERNAL_URL","").rstrip("/")
-        while url:
-            time.sleep(600)
-            try: urlopen(Request(url+"/api/status"),timeout=30).read()
-            except Exception: pass
-    threading.Thread(target=keepalive_loop,daemon=True).start()
+    threading.Thread(target=macro_updater_loop,daemon=True,name="mira-macro-refresh").start()
+    threading.Thread(target=thesis_monitor_loop,daemon=True,name="mira-thesis-monitor").start()
+    def learning_supervisor_loop():
+        # A low-cost supervisor coordinates existing collectors; provider limits and market calendars still determine actual data cadence.
+        while True:
+            try:
+                if not BRAIN_JOB.get("running"):
+                    dates,closes=load_price_series(); brain=brain_load()
+                    if brain is None or len(closes)-int(brain.get("checked_rows",0))>=BRAIN_GAP:
+                        start_brain_job(False)
+                # The price updater owns actual market refresh cadence; this loop records only operational status.
+                LEARNING_RUNTIME["last_supervisor_cycle"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                LEARNING_RUNTIME["cycles"]+=1
+            except Exception as exc:
+                LEARNING_RUNTIME["last_error"]=str(exc)[:160]
+            time.sleep(60)
+    threading.Thread(target=learning_supervisor_loop,daemon=True,name="mira-learning-supervisor").start()
     port=int(os.environ.get("PORT",8765))
     print(f"Python model server running on port {port}")
     QuietServer(("0.0.0.0",port),Handler).serve_forever()
