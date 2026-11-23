@@ -2079,7 +2079,9 @@ def chart_payload(days=180):
         refresh_minute_bars_background()
     out["intraday_candles"]=minute
     out["intraday_status"]={"status":MINUTE_CACHE.get("status"),"bars":len(minute),
-        "source":"Alpaca IEX 1-minute QQQ bars","error":MINUTE_CACHE.get("error")}
+        "source":"Alpaca IEX 1-minute QQQ bars","error":MINUTE_CACHE.get("error"),
+        "market_session":market_session().replace("_", " "),
+        "credentials_configured":bool(MARKET_API_KEY and MARKET_API_SECRET)}
     return out
 
 
@@ -2229,7 +2231,7 @@ import hashlib
 import statistics
 
 INTEL_DB = DATA_DIR / "mira_intelligence.sqlite3"
-SEC_UA = os.environ.get("MIRA_SEC_USER_AGENT", "").strip()
+SEC_UA = " ".join(os.environ.get("MIRA_SEC_USER_AGENT", "").replace("\r", " ").replace("\n", " ").split())
 FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
 
 # Supabase is the durable cloud backup for MIRA's intelligence workspace database.
