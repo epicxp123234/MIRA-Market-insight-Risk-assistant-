@@ -2333,10 +2333,9 @@ def asset_chart_payload(symbol, asset_type="equity", days=180):
         live={"connected":False,"symbol":symbol,"freshness":"CLOSED","error":"FRED index observations are daily, not a real-time exchange feed."}
     else:
         if not (MARKET_API_KEY and MARKET_API_SECRET): raise RuntimeError("Configure ALPACA_API_KEY and ALPACA_API_SECRET to load individual securities.")
-        # Verify the symbol is part of the current Alpaca active equity directory.
-        universe=asset_universe_payload()
-        if symbol not in {a["symbol"] for a in universe["equities"]}:
-            raise ValueError("Ticker is not present in Alpaca's active tradable equity directory.")
+        # The broker's asset-directory endpoint can be empty or unavailable even when its
+        # market-data endpoint can serve a valid symbol. Query the requested ticker directly;
+        # the provider response is the authority on whether this symbol/feed is available.
         start=(datetime.now(timezone.utc)-timedelta(days=max(730,days*2))).strftime("%Y-%m-%dT%H:%M:%SZ")
         base="https://data.alpaca.markets/v2/stocks/"+symbol+"/bars?"
         headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"}
@@ -2558,24 +2557,34 @@ def intel_db():
     return db
 
 
-def record_learning_event(source, event_type, symbol="", payload=None, observed_at=None):
-    """Persist a deduplicated, source-attributed observation. This is memory/feature evidence, not automatically a supervised label."""
+def record_learning_events(events):
+    """Persist a batch of source-attributed observations with one SQLite/Supabase commit."""
     try:
-        stamp=observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
-        body=json.dumps(payload or {},sort_keys=True,separators=(",",":"),ensure_ascii=False,default=str)
-        if len(body)>60000: body=body[:60000]
-        digest=hashlib.sha256((str(source)+"|"+str(event_type)+"|"+str(symbol)+"|"+body).encode("utf-8")).hexdigest()
+        rows=[]; digests=[]
+        for source,event_type,symbol,payload,observed_at in events:
+            stamp=observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+            body=json.dumps(payload or {},sort_keys=True,separators=(",",":"),ensure_ascii=False,default=str)
+            if len(body)>60000: body=body[:60000]
+            digest=hashlib.sha256((str(source)+"|"+str(event_type)+"|"+str(symbol)+"|"+body).encode("utf-8")).hexdigest()
+            rows.append((digest,str(source)[:40],str(symbol or "")[:20],str(event_type)[:60],stamp,body));digests.append(digest)
+        if not rows:return []
         db=intel_db()
         try:
-            db.execute("INSERT OR IGNORE INTO learning_events(event_id,source,symbol,event_type,observed_at,payload_json) VALUES(?,?,?,?,?,?)",(digest,str(source)[:40],str(symbol or "")[:20],str(event_type)[:60],stamp,body))
+            db.executemany("INSERT OR IGNORE INTO learning_events(event_id,source,symbol,event_type,observed_at,payload_json) VALUES(?,?,?,?,?,?)",rows)
             db.execute("DELETE FROM learning_events WHERE event_id IN (SELECT event_id FROM learning_events ORDER BY observed_at DESC LIMIT -1 OFFSET 12000)")
             db.commit()
         finally: db.close()
-        return digest
+        return digests
     except Exception as exc:
-        try: visible_status("learning_memory","Could not persist an incoming learning event: "+str(exc)[:120])
+        try: visible_status("learning_memory","Could not persist incoming learning events: "+str(exc)[:120])
         except Exception: pass
-        return None
+        return []
+
+
+def record_learning_event(source, event_type, symbol="", payload=None, observed_at=None):
+    """Persist a deduplicated observation. Event memory is not automatically a supervised label."""
+    result=record_learning_events([(source,event_type,symbol,payload,observed_at)])
+    return result[0] if result else None
 
 
 LEARNING_RUNTIME={"last_supervisor_cycle":None,"cycles":0,"last_error":None}
@@ -2625,6 +2634,7 @@ def _sec_get(url):
 
 
 SEC_TICKERS_CACHE={"at":0.0,"rows":None}
+RESEARCH_BUNDLE_CACHE={}
 def _sec_cik_for_symbol(symbol):
     now=time.time()
     if SEC_TICKERS_CACHE["rows"] is None or now-SEC_TICKERS_CACHE["at"]>86400:
@@ -2693,6 +2703,8 @@ def _news_for_symbol(symbol):
 def research_bundle(symbol):
     symbol=str(symbol or "").upper().strip()
     if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("Invalid ticker symbol.")
+    cached=RESEARCH_BUNDLE_CACHE.get(symbol)
+    if cached and time.time()-cached[0]<900:return cached[1]
     result={"symbol":symbol,"retrieved_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"fundamentals":{"available":False},"filings":{"available":False},"news":{"available":False},"macro":{"available":False}}
     try:
         sec=_sec_company_research(symbol); result["fundamentals"]={k:v for k,v in sec.items() if k not in ("filings",)}; result["filings"]={"available":sec.get("available",False),"items":sec.get("filings",[]),"source":sec.get("source"),"reason":sec.get("reason")}
@@ -2706,14 +2718,16 @@ def research_bundle(symbol):
             if pair and pair[0]: observations[name]={"date":pair[0][-1],"value":pair[1][-1]}
         result["macro"]={"available":bool(observations),"observations":observations,"source":"FRED macro series","as_of":max((x["date"] for x in observations.values()),default=None),"reason":None if observations else "Macro series have not yet been loaded into this server process."}
     except Exception as exc: result["macro"]={"available":False,"reason":str(exc)[:160]}
-    if result.get("news",{}).get("items"):
-        for item in result["news"]["items"]:
-            record_learning_event("finnhub_news","news_article",symbol,item,observed_at=item.get("published_at"))
-    if result.get("filings",{}).get("items"):
-        for item in result["filings"]["items"]:
-            record_learning_event("sec_edgar","sec_filing",symbol,item,observed_at=item.get("filed") or item.get("filing_date"))
+    events=[]
+    for item in result.get("news",{}).get("items",[]):
+        events.append(("finnhub_news","news_article",symbol,item,item.get("published_at")))
+    for item in result.get("filings",{}).get("items",[]):
+        events.append(("sec_edgar","sec_filing",symbol,item,item.get("filed") or item.get("filing_date")))
     if result.get("fundamentals",{}).get("available"):
-        record_learning_event("sec_edgar","fundamental_snapshot",symbol,result.get("fundamentals",{}))
+        snapshot=dict(result["fundamentals"]);snapshot.pop("retrieved_at",None)
+        events.append(("sec_edgar","fundamental_snapshot",symbol,snapshot,None))
+    record_learning_events(events)
+    RESEARCH_BUNDLE_CACHE[symbol]=(time.time(),result)
     return result
 
 

@@ -146,6 +146,16 @@ hr{border-color:#343434!important}
 .verdict .arrow{font-size:42px!important;line-height:1!important}
 @media(max-width:600px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.verdict .big{font-size:28px!important}}
 </style>
+<style id="mira-market-view-contrast">
+.assetbar{background:#222!important;border-color:#303030!important}
+.assetbar .assetnote{color:#a3a3a3!important}
+.stat,.layerinfo span,.mira-learning-stats>div{background:#242424!important;border-color:#303030!important}
+.stat span,.layerinfo span{color:#a3a3a3!important}
+.assetbar button{min-height:36px;padding:7px 13px!important;font-size:12px!important;font-weight:650!important}
+#verdictCard .stats .stat{padding:9px 10px!important}
+.top .stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+@media(max-width:600px){.assetbar label,.assetbar input,.assetbar select,.assetbar button{width:100%;min-width:0}.assetbar .assetnote{min-width:0}}
+</style>
 </head>
 <body>
 <header>
@@ -173,7 +183,8 @@ hr{border-color:#343434!important}
 
   <div class="assetbar" aria-label="Select market instrument">
     <label>Instrument class<select id="assetClass"><option value="equity" selected>Stocks &amp; ETFs</option><option value="index">Indices</option></select></label>
-    <label>Search<input id="assetSearch" type="search" placeholder="Search ticker or company"></label>
+    <label>Search ticker<input id="assetSearch" type="search" placeholder="NVDA, AAPL, SPY…" autocomplete="off"></label>
+    <button type="button" id="loadAsset">Load chart</button>
     <label>Market instrument<select id="assetSelect"><option value="QQQ">QQQ · Nasdaq-100 ETF</option></select></label>
     <span class="assetnote" id="assetNote">QQQ market data is separate from the Nasdaq-100 research model.</span>
   </div>
@@ -213,7 +224,7 @@ const $=id=>document.getElementById(id);
 const STATIC=!!window.MIRA_STATIC;
 const UP=getComputedStyle(document.documentElement).getPropertyValue('--up').trim()||'#2dd4bf';
 const DOWN='#f87171',GREY='#475569',WARN='#fbbf24',MUTED='#8da2bb',LINE='#1f2d44';
-let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1,selectedAsset=null,assetUniverse={indices:[],equities:[]},loadBusy=false;
+let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1,selectedAsset=null,assetUniverse={indices:[],equities:[]},loadBusy=false,loadPending=false;
 const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
 const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
@@ -254,22 +265,32 @@ function renderQuantitative(q,fusion,symbol){
  if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Validated directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Technical and statistical diagnostics above remain separate unless named in these weights.'}
  else{$('quantFusion').textContent='ARIMA is an uncalibrated Gaussian one-step diagnostic, and directional confluence is a component score, not a probability. No technical level or transformation is used as a validated BUY/SELL call.'}
 }async function load(){
-  if(loadBusy)return;loadBusy=true;
+  if(loadBusy){loadPending=true;return}loadBusy=true;
+  const requestedAsset=selectedAsset?{...selectedAsset}:null;
+  const requestKey=requestedAsset?requestedAsset.type+':'+requestedAsset.symbol:'default';
   try{
-    const endpoint=selectedAsset?('/api/asset-chart?symbol='+encodeURIComponent(selectedAsset.symbol)+'&type='+selectedAsset.type+'&days='+$('range').value):('/api/chart?days='+$('range').value); const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):endpoint,{cache:'no-store'});
+    const endpoint=requestedAsset?('/api/asset-chart?symbol='+encodeURIComponent(requestedAsset.symbol)+'&type='+requestedAsset.type+'&days='+$('range').value):('/api/chart?days='+$('range').value); const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):endpoint,{cache:'no-store'});
     const j=await r.json();
     if(j.error){throw new Error(j.error)}
+    if(requestKey!==(selectedAsset?selectedAsset.type+':'+selectedAsset.symbol:'default')){loadPending=true;return}
+    if(STATIC&&requestedAsset){throw new Error('This static page contains only the default QQQ data. Open the live MIRA server to load another ticker.')}
     if(STATIC){const n=+$('range').value,k=Math.max(0,j.dates.length-n),first=j.dates[k];j.dates=j.dates.slice(k);j.closes=j.closes.slice(k);j.candles=(j.candles||[]).filter(c=>c.d>=first);j.replay=(j.replay||[]).filter(m=>m.d>=first)}
     data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion,selectedAsset?selectedAsset.symbol:(j.research_instrument||j.chart_instrument)); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok'; if(selectedAsset){$('assetNote').textContent=(j.model_scope||'No validated model for this instrument')+' · '+(j.chart_source||'');$('assetDisclaimer').innerHTML='<b>Model scope.</b> '+(j.model_scope||'No validated neural forecast for this instrument')+'. MIRA will not transfer Nasdaq-100 model weights to another ticker. Historical price statistics are not a prediction.';}
     absorbLive(); renderCards(); draw(); drawTick();
   }catch(e){
-    $('chartMsg').textContent='Chart request unavailable: '+(e&&e.message?e.message:'request failed');
-  }finally{loadBusy=false;}
+    if(requestKey===(selectedAsset?selectedAsset.type+':'+selectedAsset.symbol:'default')){
+      const message=(e&&e.message?e.message:'request failed');
+      if(requestedAsset){
+        data=null;$('legend').textContent='';$('chartMsg').textContent=requestedAsset.symbol+' chart unavailable: '+message;$('assetNote').textContent='Could not load '+requestedAsset.symbol+': '+message;$('chipLive').textContent=requestedAsset.symbol+' · live quote unavailable';$('chipLive').className='chip';$('chipData').textContent=requestedAsset.symbol+' · price history unavailable';$('quantMeta').textContent=requestedAsset.symbol+' · data unavailable';$('quantStats').innerHTML='<div class="stat"><b>Unavailable</b><span>Market data</span></div>';$('quantDetails').textContent='No calculations were run because no price history was returned.';$('verdictCard').innerHTML='<h2>Selected ticker · '+requestedAsset.symbol+'</h2><div class="sub">No forecast or reasoning is shown until this ticker\'s market history loads.</div>';$('scoreCard').innerHTML='<h2>Calculated reasoning</h2><div class="sub">Check the ticker spelling and Alpaca market-data access. The broker symbol directory can be empty while direct market-data requests still work.</div>';for(const id of ['chart','tick']){const cv=$(id),cx=cv.getContext('2d');cx.clearRect(0,0,cv.width,cv.height)}
+      }else $('chartMsg').textContent='Chart request unavailable: '+message;
+    }
+  }finally{loadBusy=false;if(loadPending){loadPending=false;setTimeout(load,0)}}
 }
 
 function absorbLive(){
   const L=data.live||{};
   if(selectedAsset&&selectedAsset.type==='index'){$('chipLive').textContent='INDEX DAILY CLOSES · NOT REAL-TIME';$('chipLive').className='chip';}
+  else if(selectedAsset){$('chipLive').textContent=L.connected&&L.last!=null?selectedAsset.symbol+' '+fmt(L.last)+' · live provider bar':selectedAsset.symbol+' · no recent live quote';$('chipLive').className=L.connected?'chip ok':'chip';}
   else if(L.connected&&L.last!=null){
     const t=Date.now(); const last=liveBuf[liveBuf.length-1];
     if(!last||last.p!==Number(L.last)||t-last.t>20000) liveBuf.push({t,p:Number(L.last)});
@@ -280,27 +301,70 @@ function absorbLive(){
     $('chipLive').textContent='Live price off · connect Alpaca keys'; $('chipLive').className='chip';
   }
   const qqqDate=(data.dates||[]).slice(-1)[0];
-  $('chipData').textContent=(data.chart_instrument||'QQQ')+' closes through '+(qqqDate||'not available')+' · '+(data.research_instrument||'selected research')+' through '+(data.as_of||'—');
+  $('chipData').textContent=selectedAsset?selectedAsset.symbol+' closes through '+(qqqDate||'not available')+' · '+(data.chart_source||'market data'):(data.chart_instrument||'QQQ')+' closes through '+(qqqDate||'not available')+' · '+(data.research_instrument||'selected research')+' through '+(data.as_of||'—');
+}
+
+function renderSelectedAssetCards(){
+  const d=data||{},v=d.verdict||{},q=d.quantitative_intelligence||{},g=q.price_action_geometry||{},trend=g.trend_confluence||{},reg=g.regression||{},r20=reg['20']||{},r60=reg['60']||{},vol=g.volatility||{},ar=q.arima||{},model=d.symbol_model||{};
+  const symbol=selectedAsset.symbol,closes=d.closes||[],last=closes.length?Number(closes[closes.length-1]):null;
+  const change=n=>closes.length>n?(last/Number(closes[closes.length-1-n])-1):null;
+  const pp=x=>x==null||!Number.isFinite(Number(x))?'Unavailable':(Number(x)*100).toFixed(1)+'%';
+  const num=(x,digits=2)=>x==null||!Number.isFinite(Number(x))?'Unavailable':Number(x).toLocaleString(undefined,{maximumFractionDigits:digits});
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fused=v.fusion&&v.fusion.available?v.fusion.next_session_up_probability:null;
+  const pUp=fused!=null?fused:ar.next_session_positive_probability;
+  const isValidated=fused!=null&&v.fusion&&v.fusion.calibrated===true;
+  const lean=pUp==null?'ESTIMATE UNAVAILABLE':(pUp>=.52?'UPWARD LEAN':(pUp<=.48?'DOWNWARD LEAN':'MIXED / NEUTRAL'));
+  const leanClass=pUp==null?'hold':(pUp>=.52?'buy':(pUp<=.48?'sell':'hold'));
+  const risk=v.risk_score,alarm=v.alarm_level,riskAvailable=risk!=null&&alarm!=null;
+  let h='<h2>Selected ticker · '+esc(symbol)+'</h2>';
+  h+='<div class="verdict"><div class="arrow '+leanClass+'">'+(pUp==null?'—':pUp>=.52?'▲':pUp<=.48?'▼':'■')+'</div><div><div class="big '+leanClass+'">'+lean+'</div><div class="sub">Next-session up estimate: <b>'+pp(pUp)+'</b> · '+(isValidated?'validated model':'uncalibrated ARIMA diagnostic')+' · data through '+esc(d.as_of||'—')+'</div></div></div>';
+  h+='<div class="stats" style="margin-top:14px">'+
+    '<div class="stat"><b>'+(last==null?'Unavailable':num(last))+'</b><span>'+esc(symbol)+' latest close</span></div>'+
+    '<div class="stat"><b>'+pp(change(20))+'</b><span>Price change · 20 sessions</span></div>'+
+    '<div class="stat"><b>'+pp(change(60))+'</b><span>Price change · 60 sessions</span></div>'+
+    '<div class="stat"><b>'+pp(vol.atr14_pct==null?null:vol.atr14_pct/100)+'</b><span>ATR(14) average daily range</span></div></div>';
+  if(riskAvailable)h+='<div class="sub" style="margin-top:10px"><b>Separate downside-risk model:</b> '+pp(risk)+' estimated chance of an 8%+ drawdown over 21 sessions; alarm threshold '+pp(alarm)+'. This is not an up/down forecast.</div>';
+  h+='<div class="sub" style="margin-top:10px"><b>Model status:</b> '+esc(d.model_scope||'No validated symbol-specific model has been promoted.')+'</div>';
+  $('verdictCard').innerHTML=h;
+
+  const arRange=ar.next_session_price_range_95||[];
+  let s='<h2>Calculated reasoning · '+esc(symbol)+'</h2>';
+  s+='<div class="sub"><b>Price history:</b> 20-session return '+pp(change(20))+'; 60-session return '+pp(change(60))+'.</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Trend evidence:</b> '+esc(trend.classification||'insufficient history')+' ('+esc(trend.bullish_components??'—')+'/'+esc(trend.components??'—')+' components agree; component score '+pp(trend.score_pct==null?null:trend.score_pct/100)+', not a probability). 20-session regression '+esc(r20.direction||'unavailable')+' with R² '+num(r20.r_squared)+'.</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Next-session calculation:</b> '+(ar.available?'ARIMA(1,1,0) fits recent log returns; its Gaussian estimate is '+pp(ar.next_session_positive_probability)+' up, with a 95% price range '+(arRange.length===2?num(arRange[0])+'–'+num(arRange[1]):'unavailable')+'. This estimate is not calibrated and is not a validated trade call.':esc(ar.reason||'Insufficient price history for ARIMA.'))+'</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Training inputs:</b> '+(model.features&&model.features.length?'Current promoted model uses '+esc(model.features.join(', '))+'.':'No promoted symbol-specific model. News and SEC records are retained in the Supabase-backed event store, but the current symbol model is trained on price features only.')+'</div>';
+  $('scoreCard').innerHTML=s;
+
+  const hasC=d.candles&&d.candles.length>0,mode=$('chartMode').value;
+  $('legend').innerHTML=mode==='pnf'?'<span>× rising column</span><span>○ falling column</span>':mode==='ha'?'<span>Heikin-Ashi transformed OHLC · '+esc(symbol)+'</span>':mode==='1m'?'<span><i style="background:'+UP+'"></i>Up candle · '+esc(symbol)+'</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':(hasC?'<span><i style="background:'+UP+'"></i>Up candle · '+esc(symbol)+'</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span>'+esc(symbol)+' close</span>');
+  const ist=d.intraday_status||{};
+  if(mode==='1m')$('chartMsg').textContent=(ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Provider-supplied bars only.';
+  else if(mode==='ha')$('chartMsg').textContent=hasC?'Heikin-Ashi is transformed from '+esc(symbol)+' provider OHLC bars.':'OHLC bars unavailable for Heikin-Ashi.';
+  else if(mode==='pnf')$('chartMsg').textContent=esc(symbol)+' Point & Figure uses close movement, ATR-sized boxes and a three-box reversal.';
+  else $('chartMsg').textContent=(d.chart_source||'Provider historical data')+' · '+(hasC?'OHLC candles':'close observations')+' · '+(d.dates||[]).length+' sessions';
 }
 
 function renderCards(){
+  if(selectedAsset){renderSelectedAssetCards();return}
   const v=data.verdict||{}, sb=data.scoreboard||{}, lr=data.live_record||{}, f=v.fusion||{};
+  const q=data.quantitative_intelligence||{},ar=q.arima||{},geom=q.price_action_geometry||{},trend=geom.trend_confluence||{},bay=q.bayesian_drift||{};
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pp=x=>x==null||!Number.isFinite(Number(x))?'Not available':(Number(x)*100).toFixed(1)+'%';
-  let h='<h2>Research decision · '+esc(data.research_instrument||data.chart_instrument||'Nasdaq-100')+'</h2>';
+  let h='<h2>Nasdaq-100 model · direction and downside risk</h2>';
   if(v.error){h+='<div class="sub">'+esc(v.error)+'</div>'}
   else{
     const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED','SYMBOL_MODEL_NOT_TRAINED'].includes(v.decision_status);
-    const verdict=unavailable?'NO VALIDATED CALL':(['BUY','SELL','HOLD'].includes(v.verdict)?v.verdict:'NO CALL');
-    const cls=verdict==='BUY'?'buy':verdict==='SELL'?'sell':'hold', icon=verdict==='BUY'?'▲':(verdict==='SELL'?'▼':'■');
-    const risk=Number(v.risk_score), alarm=Number(v.alarm_level);
-    const validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0;
-    const riskAlert=validRisk&&risk>=alarm;
-    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">Confidence: <b>'+esc(v.confidence||'Low')+'</b> · '+esc(v.horizon_label||'next session')+' · official data through '+esc(v.as_of||'—')+'</div></div></div>';
+    const risk=Number(v.risk_score), alarm=Number(v.alarm_level),validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0,riskAlert=validRisk&&risk>=alarm;
+    const verdict=validRisk?(riskAlert?'DOWNSIDE-RISK ALERT':'NO DOWNSIDE-RISK ALERT'):(unavailable?'NO VALIDATED CALL':'MODEL STATUS UNAVAILABLE');
+    const cls=validRisk&&riskAlert?'sell':'hold', icon=validRisk&&riskAlert?'▼':'■';
+    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">This is an 8% drawdown-risk alert over 21 sessions, not a next-session direction call · data through '+esc(v.as_of||data.as_of||'—')+'</div></div></div>';
     h+='<div class="stats" style="margin-top:14px">';
-    h+='<div class="stat"><b>'+pp(f.next_session_up_probability)+'</b><span>Validated next-session rise probability'+(f.available?'':' · not validated')+'</span></div>';
-    h+='<div class="stat"><b>'+pp(f.direction_model_probability)+'</b><span>Calibrated neural expert'+(f.direction_model_probability==null?' · unavailable':'')+'</span></div>';
-    h+='<div class="stat"><b>'+pp(f.trend_conditional_probability)+'</b><span>Trend-conditioned probability · state '+esc(f.trend_state||'not available')+'</span></div>';
+    const pUp=f.next_session_up_probability!=null?f.next_session_up_probability:ar.next_session_positive_probability;
+    const pUpLabel=f.next_session_up_probability!=null?'Validated ensemble P(next close up)':'ARIMA P(next close up) · uncalibrated';
+    h+='<div class="stat"><b>'+pp(pUp)+'</b><span>'+pUpLabel+'</span></div>';
+    h+='<div class="stat"><b>'+pp(bay.probability_positive)+'</b><span>Historical mean drift positive · not next-session odds</span></div>';
+    h+='<div class="stat"><b>'+pp(trend.score_pct==null?null:trend.score_pct/100)+'</b><span>Trend-component agreement · not probability ('+esc(trend.classification||'unavailable')+')</span></div>';
     h+='<div class="stat '+(riskAlert?'warn':'')+'"><b>'+(validRisk?pp(risk):'—')+'</b><span>Separate 21-session 8%+ drawdown risk · alarm '+(validRisk?pp(alarm):'—')+'</span></div>';
     h+='</div>';
     if(f.weights) h+='<div class="sub" style="margin-top:10px">Validation/live reliability weights: direction '+pp(f.weights.direction)+' · trend '+pp(f.weights.trend)+'. Weights are based on validation log-loss skill, with a small update from matured real outcomes where enough observations exist.</div>';
@@ -309,14 +373,14 @@ function renderCards(){
       const ci=f.holdout_edge_ci_pp||[];
       h+='<div class="sub" style="margin-top:6px">Untouched holdout edge vs majority baseline: <b>'+Number(f.holdout_edge_pp).toFixed(2)+' pp</b>'+(ci.length===2?' · 95% 5-session block-bootstrap interval '+Number(ci[0]).toFixed(2)+' to '+Number(ci[1]).toFixed(2)+' pp':'')+' · '+esc(f.holdout_rows||'—')+' observations.</div>';
     }
-    h+='<div class="sub" style="margin-top:12px"><b>Why this decision:</b> '+esc(v.decision_reason||f.reason||'No explanation supplied.')+'</div>';
-    if(unavailable){const job=v.directional_job||{};h+='<div class="sub" style="margin-top:6px;color:var(--warn)">This is not a HOLD forecast. It means MIRA cannot currently substantiate a directional call from a validated model. It will not manufacture BUY/SELL labels from diagnostic calculations.</div>';if(job.running||job.message)h+='<div class="sub" style="margin-top:5px">Directional model maintenance: '+esc(job.message||'status unavailable')+'</div>';}
-    h+='<div class="sub" style="margin-top:6px">Status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Directional model horizon: next session only. Drawdown risk is a separate overlay, not an opposite-direction vote.</div>';
+    h+='<div class="sub" style="margin-top:12px"><b>Risk reasoning:</b> '+esc(v.decision_reason||'Risk model status unavailable.')+'</div>';
+    if(unavailable)h+='<div class="sub" style="margin-top:6px;color:var(--warn)">No validated directional model is deployed for next-session movement. The ARIMA estimate is a price-only diagnostic; it is not a calibrated forecast.</div>';
+    h+='<div class="sub" style="margin-top:6px">Downside-risk status: <b>'+esc(v.decision_status||'UNKNOWN')+'</b> · Risk horizon: 21 sessions. Directional probability and drawdown risk are different calculations.</div>';
     if(v.risk_model_fresh===false) h+='<div class="sub" style="margin-top:6px;color:var(--warn)">Risk model refresh is due; the directional fusion is evaluated independently.</div>';
   }
   $('verdictCard').innerHTML=h;
 
-  let s='<h2>Downside-risk model evaluation · held-out days</h2>';
+  let s='<h2>Nasdaq-100 risk model · held-out evaluation</h2><div class="sub">These test results score the 21-session drawdown-risk model. They do not measure next-session up/down accuracy.</div>';
   if(sb.available){
     const accuracy=sb.risk_classification_accuracy??sb.call_accuracy;
     const baseline=sb.no_alert_baseline_accuracy??sb.always_buy_accuracy;
@@ -334,7 +398,7 @@ function renderCards(){
   if(v.risk_horizon_days) s+=' Risk horizon: '+esc(v.risk_horizon_days)+' sessions.';
   s+='</div>';
   const dl=lr.directional||{};
-  s+='<div class="sub" style="margin-top:8px">Live directional forecasts: '+esc(dl.matured||0)+' matured next-session outcomes · recent Brier score '+(dl.recent_brier==null?'—':Number(dl.recent_brier).toFixed(3))+' · BUY/SELL call accuracy '+pp(dl.signal_accuracy)+' across '+esc(dl.graded_signals||0)+' directional calls. HOLD probabilities are still evaluated through Brier/log-loss.</div>';
+  s+='<div class="sub" style="margin-top:8px">Live directional forecasts: '+esc(dl.matured||0)+' matured next-session outcomes · recent Brier score '+(dl.recent_brier==null?'—':Number(dl.recent_brier).toFixed(3))+' · BUY/SELL call accuracy '+pp(dl.signal_accuracy)+' across '+esc(dl.graded_signals||0)+' directional calls.</div>';
   if(v.monte_carlo){
     const mc=v.monte_carlo;
     s+='<div class="sub" style="margin-top:10px"><b>Monte Carlo / moving-block bootstrap:</b> '+pp(mc.probability)+' estimated chance of an '+pp(mc.drop_threshold)+' drawdown over '+esc(mc.horizon_days)+' sessions, from '+esc(mc.simulations)+' simulated paths using '+esc(mc.block_length)+'-session blocks. '+esc(mc.interval_semantics||'')+'</div>';
@@ -482,7 +546,7 @@ async function loadAssetUniverse(){
   try{
     const r=await fetch('/api/universe?t='+Date.now(),{cache:'no-store'}),j=await r.json();
     assetUniverse=j;populateAssetSelect();
-    if(j.error)$('assetNote').textContent=j.error;
+    if(j.error)$('assetNote').textContent=j.error+' You can still type a ticker and request its chart directly.';
   }catch(e){$('assetNote').textContent='Instrument directory unavailable; existing QQQ chart remains available.'}
 }
 function populateAssetSelect(){
@@ -492,17 +556,33 @@ function populateAssetSelect(){
   const sel=$('assetSelect'),previous=sel.value;sel.replaceChildren();
   filtered.forEach(x=>sel.add(new Option(x.symbol+' · '+x.name,x.symbol)));
   if(previous&&filtered.some(x=>x.symbol===previous))sel.value=previous;
-  if(!filtered.length)sel.add(new Option(type==='equity'?'No Alpaca symbols available':'No matching indices',''));
-  $('assetNote').textContent=type==='equity'?(assetUniverse.equity_count||0)+' active Alpaca equity/ETF symbols · IEX feed and account entitlements apply.':'Daily index observations · FRED is not an intraday exchange feed.';
+  if(!filtered.length)sel.add(new Option(type==='equity'?'No listed symbols · use ticker search':'No matching indices',''));
+  $('assetNote').textContent=type==='equity'?((assetUniverse.equity_count||0)+' symbols in the Alpaca directory. Type any ticker and choose Load chart; data access depends on Alpaca credentials/feed entitlements.'):'Daily index observations · FRED is not an intraday exchange feed.';
 }
+function loadTypedAsset(){
+  const raw=$('assetSearch').value.trim().toUpperCase();let symbol=raw,type=$('assetClass').value;
+  if(type==='index'){
+    const aliases={'NASDAQ-100':'NASDAQ100','NDX':'NASDAQ100','^NDX':'NASDAQ100','^NDX100':'NASDAQ100','SPX':'SP500','^GSPC':'SP500','^SPX':'SP500','DJI':'DJIA','^DJI':'DJIA'};
+    symbol=aliases[symbol]||symbol;
+  }
+  if(!symbol){$('assetNote').textContent='Type a company or ETF ticker first.';return}
+  if(!/^[A-Z0-9.-]{1,12}$/.test(symbol)){ $('assetNote').textContent='Use a ticker with letters, numbers, periods or hyphens.';return }
+  selectedAsset={symbol,type};$('chartMode').disabled=(type==='index');if(type==='index')$('chartMode').value='daily';hover=-1;liveBuf=[];
+  const sel=$('assetSelect');if(![...sel.options].some(o=>o.value===symbol))sel.add(new Option(symbol+' · typed ticker',symbol));sel.value=symbol;
+  $('assetNote').textContent='Loading '+symbol+' directly from the market-data provider…';$('chartMsg').textContent='Loading '+symbol+' history and calculations…';load();collectSymbolResearch(symbol);
+}
+function collectSymbolResearch(symbol){if(!selectedAsset||selectedAsset.type!=='equity')return;const field=$('miSymbol'),button=$('miResearch');if(field&&button){field.value=symbol;button.click()}}
 $('assetClass').addEventListener('change',populateAssetSelect);
 $('assetSearch').addEventListener('input',populateAssetSelect);
+$('assetSearch').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();loadTypedAsset()}});
+$('loadAsset').addEventListener('click',loadTypedAsset);
 $('assetSelect').addEventListener('change',()=>{
   const type=$('assetClass').value,symbol=$('assetSelect').value;
   if(!symbol)return;
   selectedAsset={symbol,type};$('chartMode').disabled=(type==='index');if(type==='index')$('chartMode').value='daily';hover=-1;liveBuf=[];
+  $('assetSearch').value=symbol;
   $('chartMsg').textContent='Loading '+symbol+' market history…';
-  load();
+  load();collectSymbolResearch(symbol);
 });
 $('range').addEventListener('change',load);$('chartMode').addEventListener('change',()=>{hover=-1;load()});
 window.addEventListener('resize',()=>{draw();drawTick()});
