@@ -137,6 +137,15 @@ canvas{background:transparent!important}
 hr{border-color:#343434!important}
 @media(prefers-color-scheme:light){html,body{color-scheme:dark!important;background:#212121!important;color:#e6e6e6!important}}
 </style>
+<style id="mira-readable-decision-type">
+.stats{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+.verdict .big{font-family:system-ui,-apple-system,"Segoe UI",sans-serif!important;font-size:clamp(26px,3vw,34px)!important;font-weight:800!important;line-height:1.08!important;letter-spacing:-.02em!important;overflow-wrap:anywhere}
+.verdict .big.hold{color:#ffd166!important;text-shadow:0 0 16px #ffd16612}
+.verdict .big.buy{color:#5fd6b1!important}
+.verdict .big.sell{color:#ff8585!important}
+.verdict .arrow{font-size:42px!important;line-height:1!important}
+@media(max-width:600px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))!important}.verdict .big{font-size:28px!important}}
+</style>
 </head>
 <body>
 <header>
@@ -172,7 +181,7 @@ hr{border-color:#343434!important}
     <div class="ctrl">
       <div class="legend" id="legend"></div>
       <label class="sub">Chart
-        <select id="chartMode"><option value="daily" selected>Daily history</option><option value="1m">Live · 1-minute candles</option></select>
+        <select id="chartMode"><option value="daily" selected>Daily history</option><option value="ha">Heikin-Ashi · daily</option><option value="pnf">Point &amp; Figure</option><option value="1m">Live · 1-minute candles</option></select>
       </label>
       <label class="sub">Range
         <select id="range"><option value="90">3 months</option><option value="180" selected>6 months</option><option value="365">1 year</option></select>
@@ -208,16 +217,50 @@ let data=null,hover=-1,liveBuf=[],geo=null,dpr=window.devicePixelRatio||1,select
 const pct=(x,d=1)=>x==null?'—':(x*100).toFixed(d)+'%';
 const fmt=(x,d=2)=>x==null?'—':Number(x).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 
-function renderQuantitative(q,fusion){const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{};const vals=[{v:bay.probability_positive==null?'—':pct(bay.probability_positive),l:'Bayesian P(positive drift)'},{v:kal.trend_pct_per_session==null?'—':Number(kal.trend_pct_per_session).toFixed(3)+'%',l:'Kalman trend / session'},{v:ga.next_volatility_pct==null?'—':Number(ga.next_volatility_pct).toFixed(3)+'%',l:'GARCH next-session volatility'},{v:hm.high_volatility_probability_next==null?'—':pct(hm.high_volatility_probability_next),l:'HMM high-volatility probability'}];$('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');$('quantMeta').textContent=q&&q.available?'Calculated from '+esc(q.as_of_date||'latest official daily closes')+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative calculations unavailable · '+esc(q&&q.reason||'insufficient data');const d=q&&q.derivative_features||{},o=q&&q.optimization||{};const bits=['First difference Δr: '+(d.first_difference_daily_log_return==null?'—':(Number(d.first_difference_daily_log_return)*100).toFixed(3)+'%'),'Second difference Δ²r: '+(d.second_difference_change_in_daily_log_return==null?'—':(Number(d.second_difference_change_in_daily_log_return)*100).toFixed(4)+' pp'),'Solver: '+(o.solver||'—'),'Curvature: '+(o.curvature||'—'),'GARCH persistence: '+(ga.persistence==null?'—':Number(ga.persistence).toFixed(3)),'HMM: '+(hm.status||'not fitted')];$('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), AD/Hessian logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Weights are based on validation log-loss skill. Kalman/GARCH/HMM/Bayesian calculations are reported as separate context and do not automatically override direction.'}else{$('quantFusion').textContent='No validated directional probability ensemble is present. Bayesian P(positive drift) describes the posterior sign of the historical mean return, not the next-session direction. GARCH is a constrained Gaussian maximum-likelihood fit; HMM is a fitted two-state Gaussian volatility regime model. Neither is an automatic BUY/SELL vote.'}}
-
-async function load(){
+function renderQuantitative(q,fusion,symbol){
+ const esc=x=>String(x??"—").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const bay=q&&q.bayesian_drift||{},kal=q&&q.kalman||{},ga=q&&q.garch||{},hm=q&&q.hmm||{},ar=q&&q.arima||{};
+ const g=q&&q.price_action_geometry||{},vol=g.volatility||{},trend=g.trend_confluence||{};
+ const pctSafe=x=>x==null||!Number.isFinite(Number(x))?'—':(Number(x)*100).toFixed(1)+'%';
+ const num=x=>x==null||!Number.isFinite(Number(x))?'—':Number(x).toLocaleString(undefined,{maximumFractionDigits:2});
+ const vals=[
+  {v:pctSafe(bay.probability_positive),l:'Bayesian P(positive mean drift)'},
+  {v:kal.trend_pct_per_session==null?'—':num(kal.trend_pct_per_session)+'%',l:'Kalman trend / session'},
+  {v:ga.next_volatility_pct==null?'—':num(ga.next_volatility_pct)+'%',l:'GARCH next-session volatility'},
+  {v:pctSafe(hm.high_volatility_probability_next),l:'HMM high-volatility regime'},
+  {v:pctSafe(ar.next_session_positive_probability),l:'ARIMA P(next close up) · uncalibrated'},
+  {v:vol.atr14_pct==null?'—':num(vol.atr14_pct)+'%',l:'ATR(14) daily range'},
+  {v:trend.score_pct==null?'—':num(trend.score_pct)+'%',l:'Directional confluence · not probability'}
+ ];
+ $('quantStats').innerHTML=vals.map(x=>'<div class="stat"><b>'+esc(x.v)+'</b><span>'+esc(x.l)+'</span></div>').join('');
+ $('quantMeta').textContent=(symbol?esc(symbol)+' · ':'')+(q&&q.as_of_date?'Calculated through '+esc(q.as_of_date)+' · '+esc(q.as_of_returns||0)+' log returns':'Quantitative model fit unavailable · '+esc(q&&q.reason||'insufficient data'));
+ const reg=g.regression||{},r20=reg['20']||{},r60=reg['60']||{},fib=g.fibonacci_last_swing||{},floor=g.floor_pivots||{},ichi=g.ichimoku||{},cloud=ichi.cloud||{},smooth=g.smoothed_transforms||{},ha=smooth.heikin_ashi||{},pr=ar.next_session_price_range_95||[];
+ const range=g.ranges&&(g.ranges['60']||g.ranges['20'])||{},harm=g.harmonic_patterns||[],pnf=g.point_and_figure||{};
+ const bits=[
+  '20-session regression: '+(r20.direction||'—')+' · slope '+(r20.slope_pct_per_20_sessions==null?'—':num(r20.slope_pct_per_20_sessions)+'% / 20 sessions')+' · R² '+(r20.r_squared==null?'—':num(r20.r_squared)),
+  '60-session regression: '+(r60.direction||'—')+' · R² '+(r60.r_squared==null?'—':num(r60.r_squared)),
+  'McGinley Dynamic(14): '+num(smooth.mcginley_dynamic_14)+' · price vs MD '+(smooth.price_vs_mcginley_pct==null?'—':num(smooth.price_vs_mcginley_pct)+'%'),
+  'Swing range: '+num(range.swing_low)+'–'+num(range.swing_high)+' · measured move only after breakout/breakdown: '+num(range.measured_move_up_if_breakout)+' / '+num(range.measured_move_down_if_breakdown),
+  'Last confirmed swing Fib: 38.2% '+num(fib.retracements&&fib.retracements['0.382'])+' · 61.8% '+num(fib.retracements&&fib.retracements['0.618'])+' · extensions '+num(fib.extensions&&fib.extensions['1.272'])+' / '+num(fib.extensions&&fib.extensions['1.618']),
+  'Prior-candle floor pivots: P '+num(floor.P)+' · R1 '+num(floor.R1)+' · S1 '+num(floor.S1),
+  'Ichimoku: Tenkan '+num(ichi.tenkan_9)+' · Kijun '+num(ichi.kijun_26)+' · cloud '+(cloud.price_vs_cloud||'unavailable'),
+  'Heikin-Ashi: '+(ha.last_three_bullish==null?'OHLC unavailable':(ha.last_three_bullish?'last 3 transformed candles bullish':'mixed / bearish last 3 transformed candles')),
+  'ARIMA(1,1,0) 95% next-session price range: '+(pr.length===2?num(pr[0])+'–'+num(pr[1]):'unavailable')+' · '+(ar.calibrated?'calibrated':'not calibrated'),
+  'Harmonic ratio checks: '+(harm.length?harm.map(x=>x.direction+' '+x.pattern+' near '+num(x.pivots&&x.pivots[4]&&x.pivots[4].price)).join('; '):'no recent match'),
+  'Point & Figure: '+(pnf.available?(pnf.columns+' columns · '+num(pnf.box_size)+' ATR-sized box · '+pnf.reversal_boxes+'-box reversal'):'insufficient price movement for a column'),
+  'Source: '+(g.geometry_source||'geometry unavailable')+' · levels are descriptive, not guaranteed targets'
+ ];
+ $('quantDetails').innerHTML=bits.map(x=>'<span>'+esc(x)+'</span>').join('');
+ if(fusion&&fusion.available&&fusion.expert_probabilities){const ex=fusion.expert_probabilities,w=fusion.weights||{};$('quantFusion').textContent='Validated directional ensemble: neural '+pct(ex.neural)+' (weight '+pct(w.neural||0)+'), logistic '+pct(ex.logistic_newton)+' (weight '+pct(w.logistic_newton||0)+'), trend '+pct(ex.trend)+' (weight '+pct(w.trend||0)+'). Technical and statistical diagnostics above remain separate unless named in these weights.'}
+ else{$('quantFusion').textContent='ARIMA is an uncalibrated Gaussian one-step diagnostic, and directional confluence is a component score, not a probability. No technical level or transformation is used as a validated BUY/SELL call.'}
+}async function load(){
   if(loadBusy)return;loadBusy=true;
   try{
     const endpoint=selectedAsset?('/api/asset-chart?symbol='+encodeURIComponent(selectedAsset.symbol)+'&type='+selectedAsset.type+'&days='+$('range').value):('/api/chart?days='+$('range').value); const r=await fetch(STATIC?('api/chart.json?t='+Date.now()):endpoint,{cache:'no-store'});
     const j=await r.json();
     if(j.error){throw new Error(j.error)}
     if(STATIC){const n=+$('range').value,k=Math.max(0,j.dates.length-n),first=j.dates[k];j.dates=j.dates.slice(k);j.closes=j.closes.slice(k);j.candles=(j.candles||[]).filter(c=>c.d>=first);j.replay=(j.replay||[]).filter(m=>m.d>=first)}
-    data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok'; if(selectedAsset){$('assetNote').textContent=(j.model_scope||'No validated model for this instrument')+' · '+(j.chart_source||'');$('assetDisclaimer').innerHTML='<b>Model scope.</b> '+(j.model_scope||'No validated neural forecast for this instrument')+'. MIRA will not transfer Nasdaq-100 model weights to another ticker. Historical price statistics are not a prediction.';}
+    data=j; renderQuantitative(j.quantitative_intelligence,j.verdict&&j.verdict.fusion,selectedAsset?selectedAsset.symbol:(j.research_instrument||j.chart_instrument)); $('chipServer').textContent='Server live · '+new Date().toLocaleTimeString(); $('chipServer').className='chip ok'; if(selectedAsset){$('assetNote').textContent=(j.model_scope||'No validated model for this instrument')+' · '+(j.chart_source||'');$('assetDisclaimer').innerHTML='<b>Model scope.</b> '+(j.model_scope||'No validated neural forecast for this instrument')+'. MIRA will not transfer Nasdaq-100 model weights to another ticker. Historical price statistics are not a prediction.';}
     absorbLive(); renderCards(); draw(); drawTick();
   }catch(e){
     $('chartMsg').textContent='Chart request unavailable: '+(e&&e.message?e.message:'request failed');
@@ -299,40 +342,74 @@ function renderCards(){
   $('scoreCard').innerHTML=s;
 
   const hasC=data.candles&&data.candles.length>0;
-  $('legend').innerHTML=(hasC?'<span><i style="background:'+UP+'"></i>QQQ up candle</span><span><i style="background:'+DOWN+'"></i>QQQ down candle</span>':'<span><i style="background:#9fb3c8"></i>QQQ close</span>');
+  const chartSymbol=data.chart_instrument||data.symbol||'Instrument',mode=$('chartMode').value;
+  $('legend').innerHTML=mode==='pnf'?'<span>× rising column</span><span>○ falling column</span>':mode==='ha'?'<span>Heikin-Ashi transformed OHLC · '+chartSymbol+'</span>':mode==='1m'?'<span><i style="background:'+UP+'"></i>Up candle · '+chartSymbol+'</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':(hasC?'<span><i style="background:'+UP+'"></i>Up candle · '+chartSymbol+'</span><span><i style="background:'+DOWN+'"></i>Down candle</span>':'<span><i style="background:#9fb3c8"></i>'+chartSymbol+' close</span>');
   const ist=data.intraday_status||{};
-  $('chartMsg').textContent=S.liveMode?((ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Only provider-supplied bars are shown; outside market hours the last completed candle remains unchanged.'):(hasC?'QQQ daily OHLC is aggregated from saved Alpaca IEX hourly bars. The Nasdaq-100 research model is separate and is not overlaid on QQQ candles. Missing QQQ sessions are not filled with synthetic candles.':'QQQ daily candles are unavailable. Connect Alpaca keys and allow hourly history to collect; Nasdaq-100 research data is not substituted.');
+  if(mode==='1m')$('chartMsg').textContent=(ist.status||'MINUTE BARS UNAVAILABLE')+' · '+(ist.bars||0)+' bars · '+(ist.source||'Alpaca IEX')+'. Only provider-supplied bars are shown; no synthetic candles are generated.';
+  else if(mode==='ha')$('chartMsg').textContent=hasC?'Heikin-Ashi is calculated from provider OHLC bars and smooths candle display; the transformed values are not separate market observations.':'This instrument has close-only history. Heikin-Ashi is unavailable until provider OHLC bars exist.';
+  else if(mode==='pnf')$('chartMsg').textContent='Point & Figure uses close movement, an ATR-sized box and a three-box reversal; time is omitted and the resulting columns are a chart transformation.';
+  else $('chartMsg').textContent=selectedAsset?(data.chart_source||'Provider historical data')+' · '+(hasC?'Provider candles; no synthetic bars.':'Close-only observations; no candles are fabricated.'):(hasC?'QQQ daily OHLC is aggregated from saved Alpaca IEX hourly bars. Nasdaq-100 research remains a separate instrument.':'QQQ daily candles are unavailable. Connect Alpaca keys and allow hourly history to collect; Nasdaq-100 history is not substituted.');
 }
 
 function setup(cv){const r=cv.getBoundingClientRect();cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return {x,w:r.width,h:r.height}}
 
 function series(){
-  const d=data, liveMode=$('chartMode').value==='1m';
-  const minute=(d.intraday_candles||[]).slice();
-  const closeOnly=!liveMode&&(!d.candles||!d.candles.length);
-  const dates=liveMode?minute.map(c=>c.t):d.dates.slice();
-  const sourceCandles=liveMode?minute.map(c=>({d:c.t,o:c.o,h:c.h,l:c.l,c:c.c,live:true})):(d.candles||[]);
-  const hasC=liveMode?sourceCandles.length>0:(sourceCandles.length>0||((d.closes||[]).length>1));
-  const cmap={}; (sourceCandles||[]).forEach(c=>cmap[c.d]=Object.assign({},c));
-  if(closeOnly)(d.closes||[]).forEach((v,i)=>{if(dates[i]!=null&&Number.isFinite(Number(v)))cmap[dates[i]]={d:dates[i],o:Number(v),h:Number(v),l:Number(v),c:Number(v),closeOnly:true};});
-  const L=d.live||{};
-  const lastC=(d.candles||[]).slice(-1)[0];
-  if(!liveMode&&hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<0.25){
-    const md=(L.market_time||'').slice(0,10), p=Number(L.last);
-    if(md){ if(!dates.includes(md)&&md>dates[dates.length-1]) dates.push(md);
-      const c=cmap[md]; if(c){c.c=p;c.h=Math.max(c.h,p);c.l=Math.min(c.l,p);c.live=true}
-      else{const prev=[...dates].reverse().map(x=>cmap[x]).find(Boolean); const o=prev?prev.c:p; cmap[md]={d:md,o:o,h:Math.max(o,p),l:Math.min(o,p),c:p,live:true}} }
+ const d=data,mode=$('chartMode').value,liveMode=mode==='1m',heikinAshi=mode==='ha',pointFigure=mode==='pnf';
+ const minute=(d.intraday_candles||[]).slice();
+ let dates=liveMode?minute.map(c=>c.t):(d.dates||[]).slice();
+ let sourceCandles=liveMode?minute.map(c=>({d:c.t,o:c.o,h:c.h,l:c.l,c:c.c,live:true})):(d.candles||[]).slice();
+ let boxSize=null;
+ if(pointFigure){
+  const values=(d.closes||[]).map(Number).filter(v=>Number.isFinite(v)&&v>0),steps=[];
+  for(let i=Math.max(1,values.length-15);i<values.length;i++){const v=Math.abs(values[i]-values[i-1]);if(v>0)steps.push(v)}
+  steps.sort((a,b)=>a-b);boxSize=steps.length?steps[Math.floor(steps.length/2)]:(Math.abs(values[values.length-1]||1)*.005);
+  boxSize=Math.max(boxSize,1e-8);
+  const cols=[];let direction=0,extreme=values[0]||0,reversal=3;
+  for(const price of values.slice(1)){
+   if(!direction){
+    if(price>=extreme+boxSize){direction=1;cols.push({direction:1,low:extreme,high:price})}
+    else if(price<=extreme-boxSize){direction=-1;cols.push({direction:-1,high:extreme,low:price})}
+   }else if(direction>0){
+    const col=cols[cols.length-1];
+    if(price>col.high)col.high=price;
+    else if(price<=col.high-reversal*boxSize){direction=-1;cols.push({direction:-1,high:col.high-boxSize,low:price})}
+   }else{
+    const col=cols[cols.length-1];
+    if(price<col.low)col.low=price;
+    else if(price>=col.low+reversal*boxSize){direction=1;cols.push({direction:1,low:col.low+boxSize,high:price})}
+   }
   }
-  const idx={}; dates.forEach((x,i)=>idx[x]=i);
-  const calls={}; if(!liveMode)(d.replay||[]).forEach(m=>calls[m.d]=m);
-  return {dates,cmap,idx,calls,hasC,liveMode,closeOnly};
+  dates=cols.map((_,i)=>'Column '+(i+1));
+  sourceCandles=cols.map((c,i)=>({d:dates[i],o:c.direction>0?c.low:c.high,c:c.direction>0?c.high:c.low,h:c.high,l:c.low,pnfDirection:c.direction}));
+ }else if(heikinAshi){
+  if(sourceCandles.length){
+   let previousOpen=null,previousClose=null;
+   sourceCandles=sourceCandles.map(c=>{
+    const o=Number(c.o),h=Number(c.h),l=Number(c.l),cl=Number(c.c);
+    const haClose=(o+h+l+cl)/4,haOpen=previousOpen==null?(o+cl)/2:(previousOpen+previousClose)/2;
+    const result={d:c.d,o:haOpen,c:haClose,h:Math.max(h,haOpen,haClose),l:Math.min(l,haOpen,haClose)};
+    previousOpen=haOpen;previousClose=haClose;return result;
+   });
+   dates=sourceCandles.map(c=>c.d);
+  }
+ }
+ const closeOnly=!liveMode&&!heikinAshi&&!pointFigure&&(!(d.candles||[]).length);
+ const cmap={};sourceCandles.forEach(c=>{if(c&&c.d!=null)cmap[c.d]=Object.assign({},c)});
+ if(closeOnly)(d.closes||[]).forEach((v,i)=>{if(dates[i]!=null&&Number.isFinite(Number(v)))cmap[dates[i]]={d:dates[i],o:Number(v),h:Number(v),l:Number(v),c:Number(v),closeOnly:true}});
+ const hasC=pointFigure?sourceCandles.length>0:(liveMode?sourceCandles.length>0:(heikinAshi?sourceCandles.length>0:(sourceCandles.length>0||((d.closes||[]).length>1))));
+ const L=d.live||{},lastC=(d.candles||[]).slice(-1)[0];
+ if(!liveMode&&!heikinAshi&&!pointFigure&&hasC&&L.connected&&L.last!=null&&lastC&&Math.abs(L.last/lastC.c-1)<.25){
+  const md=(L.market_time||'').slice(0,10),p=Number(L.last);
+  if(md){if(!dates.includes(md)&&md>dates[dates.length-1])dates.push(md);const c=cmap[md];if(c){c.c=p;c.h=Math.max(c.h,p);c.l=Math.min(c.l,p);c.live=true}else{const prev=[...dates].reverse().map(x=>cmap[x]).find(Boolean),o=prev?prev.c:p;cmap[md]={d:md,o:o,h:Math.max(o,p),l:Math.min(o,p),c:p,live:true}}}
+ }
+ const idx={};dates.forEach((x,i)=>idx[x]=i);const calls={};if(!liveMode)(d.replay||[]).forEach(m=>calls[m.d]=m);
+ return {dates,cmap,idx,calls,hasC,liveMode,closeOnly,heikinAshi,pointFigure,boxSize};
 }
-
 function draw(){
   if(!data) return;
   const cv=$('chart'); const {x,w,h}=setup(cv); x.clearRect(0,0,w,h);
   const S=series(), N=S.dates.length, padL=8, padR=64, fz=90, top=14, axisH=20, stripH=0, gap=10;
-  if(!N||!S.hasC){const ist=(data&&data.intraday_status)||{};const closed=/closed|after-hours|pre-market/i.test(ist.market_session||'');const missingKeys=ist.credentials_configured===false;const message=S.liveMode?(missingKeys?'Alpaca credentials are not configured on the server.':(closed?'US market is closed. No recent IEX minute bars were returned; try Daily history or check again during the session.':'No recent Alpaca IEX minute bars were returned. The API credentials may be configured; inspect the provider status for the request error.')):'No daily market history is available for this instrument.';x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(message,w/2,h/2);$('chartMsg').textContent=S.liveMode?(message+' No synthetic candles are generated.'):'No daily history is available; values from another instrument are never substituted.';return}
+  if(!N||!S.hasC){const ist=(data&&data.intraday_status)||{};const closed=/closed|after-hours|pre-market/i.test(ist.market_session||'');const missingKeys=ist.credentials_configured===false;const message=$('chartMode').value==='1m'?(missingKeys?'Alpaca credentials are not configured on the server.':(closed?'US market is closed. No recent IEX minute bars were returned; try Daily history or check again during the session.':'No recent Alpaca IEX minute bars were returned. The API credentials may be configured; inspect the provider status for the request error.')):(S.heikinAshi?'Heikin-Ashi requires actual OHLC bars; close-only index data are not converted into synthetic candles.':(S.pointFigure?'Price history is too short to form an ATR-sized Point & Figure column.':'No daily market history is available for this instrument.'));x.fillStyle=MUTED;x.font='13px system-ui';x.textAlign='center';x.fillText(message,w/2,h/2);$('chartMsg').textContent=message+($('chartMode').value==='1m'?' No synthetic candles are generated.':'');return}
   const plotW=w-padL-padR-fz, plotH=h-top-axisH-stripH-gap, step=plotW/N;
   const X=i=>padL+(i+.5)*step;
   let lo=Infinity,hi=-Infinity;
@@ -344,7 +421,10 @@ function draw(){
   x.font='11px system-ui';x.textBaseline='middle';
   for(let k=0;k<=4;k++){const v=lo+(hi-lo)*k/4,yy=Y(v);x.strokeStyle=LINE;x.lineWidth=1;x.beginPath();x.moveTo(padL,yy);x.lineTo(padL+plotW,yy);x.stroke();x.fillStyle=MUTED;x.textAlign='left';x.fillText(fmt(v,0),padL+4,yy-7)}
   // price
-  if(S.closeOnly){
+  if(S.pointFigure){
+    x.textAlign='center';x.textBaseline='middle';x.font=Math.max(9,Math.min(14,step*.8))+'px system-ui';
+    S.dates.forEach((dd,i)=>{const c=S.cmap[dd];if(!c)return;const first=Math.ceil(c.l/S.boxSize)*S.boxSize;for(let level=first;level<=c.h+S.boxSize*.01;level+=S.boxSize){x.fillStyle=c.pnfDirection>0?UP:DOWN;x.fillText(c.pnfDirection>0?'×':'○',X(i),Y(level))}});
+  }else if(S.closeOnly){
     x.strokeStyle=BLUE;x.lineWidth=1.8;x.beginPath();let started=false;
     S.dates.forEach((dd,i)=>{const c=S.cmap[dd];if(!c)return;const xx=X(i),yy=Y(c.c);if(!started){x.moveTo(xx,yy);started=true}else x.lineTo(xx,yy)});
     x.stroke();
@@ -358,7 +438,7 @@ function draw(){
   // it is a different instrument and must not be date/price-aligned as if identical.
   // date axis
   x.fillStyle=MUTED;x.font='11px system-ui';x.textAlign='center';x.textBaseline='top';
-  const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));const label=S.liveMode?String(S.dates[i]).slice(11,16):String(S.dates[i]).slice(5);x.fillText(label,X(i),h-axisH+6)}
+  const ticks=Math.min(6,N);for(let k=0;k<ticks;k++){const i=Math.round(k*(N-1)/(ticks-1||1));const label=S.pointFigure?String(i+1):$('chartMode').value==='1m'?String(S.dates[i]).slice(11,16):String(S.dates[i]).slice(5);x.fillText(label,X(i),h-axisH+6)}
   // forecast zone
   const fx=padL+plotW+ (fz>0?6:0), v=data.verdict||{};
   x.textBaseline='middle';
@@ -447,8 +527,34 @@ load();
  async function savePortfolio(){try{const h=parseHoldings();const r=await post('/api/portfolio',{holdings:h});$mi('miPortfolio').textContent='Saved '+r.holdings+' holdings to this browser workspace.'}catch(e){$mi('miPortfolio').textContent='Could not save: '+e.message}}
  async function analyzePortfolio(){try{const d=await get('/api/portfolio');const box=$mi('miPortfolio');box.replaceChildren();if(!d.available){box.textContent=d.reason||'Portfolio analysis unavailable';return}const rows=[['Annualized volatility',((d.annualized_volatility||0)*100).toFixed(2)+'%'],['Historical daily VaR 95%',((d.historical_daily_var_95||0)*100).toFixed(2)+'%'],['Historical daily CVaR 95%',((d.historical_daily_cvar_95||0)*100).toFixed(2)+'%'],['Maximum drawdown',((d.max_drawdown||0)*100).toFixed(2)+'%'],['Common observations',String(d.observations)],['As of',d.as_of]];rows.forEach(x=>box.append(metric(x[0],x[1])));item(box,'Methodology',d.method);(d.failed||[]).forEach(x=>item(box,x.symbol+' unavailable',x.reason));(d.holdings||[]).forEach(x=>item(box,x.symbol+' · '+(Number(x.weight||0)*100).toFixed(1)+'% weight','Estimated value '+Number(x.market_value_estimate||0).toFixed(2)+' · volatility contribution '+(x.volatility_contribution_share==null?'—':(Number(x.volatility_contribution_share)*100).toFixed(1)+'%')));Object.entries(d.factor_exposures||{}).forEach(([k,v])=>{if(v&&typeof v==='object')item(box,k+' · S&P 500 beta proxy',v.sp500_beta_proxy==null?(v.reason||'Unavailable'):Number(v.sp500_beta_proxy).toFixed(3)+' · '+v.observations+' observations')});}catch(e){$mi('miPortfolio').textContent='Analysis failed: '+e.message}}
  async function governance(){try{const d=await get('/api/governance');const box=$mi('miGovernanceView');box.replaceChildren();[['Predictions recorded',d.predictions_recorded],['Predictions graded',d.predictions_graded],['Prospective Brier score',d.brier==null?'Not yet available':Number(d.brier).toFixed(4)],['Prospective log loss',d.log_loss==null?'Not yet available':Number(d.log_loss).toFixed(4)]].forEach(x=>box.append(metric(x[0],x[1])));(d.asset_models||[]).forEach(m=>item(box,m.symbol+' · '+m.instrument_type+' · CHAMPION','Holdout rows '+(m.holdout&&m.holdout.rows||0)+' · Brier '+(m.holdout&&m.holdout.brier!=null?Number(m.holdout.brier).toFixed(4):'—')+' · AUC '+(m.holdout&&m.holdout.auc!=null?Number(m.holdout.auc).toFixed(3):'—')+' · '+(m.data_as_of||'')));(d.challenger_runs||[]).forEach(m=>item(box,m.symbol+' · '+m.status,'Holdout '+(m.holdout&&m.holdout.rows||0)+' · Brier '+(m.holdout&&m.holdout.brier!=null?Number(m.holdout.brier).toFixed(4):'—')+' · '+(m.promotion_reason||'')));}catch(e){$mi('miGovernanceView').textContent=e.message}}
- async function train(){const s=sym(),type=($mi('assetClass')&&$mi('assetClass').value)||'equity';$mi('miTrain').disabled=true;$mi('miResearchStatus').textContent='Training '+s+' with purged chronological splits…';try{const d=await post('/api/model/train',{symbol:s,type});$mi('miResearchStatus').textContent='Model '+(d.model.status||'stored')+' for '+s+' · holdout Brier '+Number(d.model.holdout.brier).toFixed(4)+' · AUC '+(d.model.holdout.auc==null?'unavailable':Number(d.model.holdout.auc).toFixed(3))+' · data through '+d.model.data_as_of;await governance()}catch(e){$mi('miResearchStatus').textContent='Training unavailable: '+e.message+'. Training is owner-only on the hosted service; run it from the private owner environment.'}finally{$mi('miTrain').disabled=false}}
- $mi('miResearch').onclick=research;$mi('miTrain').onclick=train;$mi('miSaveThesis').onclick=saveThesis;$mi('miSavePortfolio').onclick=savePortfolio;$mi('miAnalyzePortfolio').onclick=analyzePortfolio;$mi('miGovernance').onclick=governance;$mi('miRefresh').onclick=()=>{research();loadTheses();analyzePortfolio();governance()};loadTheses();governance();
+ async function waitForNasdaqTraining(){
+  const stop=Date.now()+15*60*1000;
+  while(Date.now()<stop){
+   await new Promise(resolve=>setTimeout(resolve,5000));
+   const d=await get('/api/brain'),job=d.job||{};
+   if(job.running){$mi('miResearchStatus').textContent=job.message||'Nasdaq-100 neural ensemble is training in the background…';continue}
+   if(job.error)throw Error(job.message||job.error);
+   if(d.trained){$mi('miResearchStatus').textContent='Nasdaq-100 model training finished · trained through '+(d.trained_through||'latest available close')+'.';await governance();load();return}
+   throw Error(job.message||'Training stopped before a model was saved.');
+  }
+  $mi('miResearchStatus').textContent='Training is still running in the background. Refresh model governance shortly to see the saved result.';
+ }
+ async function train(){
+  const s=sym(),indexSymbols=new Set(['NASDAQ100','NASDAQ-100','NDX','^NDX','^NDX100','SP500','SPX','^GSPC','^SPX','DJIA','DJI','^DJI']),type=indexSymbols.has(s)?'index':'equity',button=$mi('miTrain');
+  button.disabled=true;$mi('miResearchStatus').textContent='Starting chronological training for '+s+'…';
+  try{
+   const d=await post('/api/model/train',{symbol:s,type});
+   if(d.workflow==='nasdaq100_neural_brain'||d.started||d.job){
+    $mi('miResearchStatus').textContent=d.message||'Training started. Waiting for model status…';
+    await waitForNasdaqTraining();return;
+   }
+   if(!d.model)throw Error(d.error||d.message||'The server did not return a model result.');
+   const model=d.model,hold=model.holdout||{};
+   $mi('miResearchStatus').textContent='Model '+(model.status||'stored')+' for '+s+' · holdout Brier '+(hold.brier==null?'unavailable':Number(hold.brier).toFixed(4))+' · AUC '+(hold.auc==null?'unavailable':Number(hold.auc).toFixed(3))+' · data through '+(model.data_as_of||'—');
+   await governance();load();
+  }catch(e){$mi('miResearchStatus').textContent='Training failed: '+e.message}
+  finally{button.disabled=false}
+ }$mi('miResearch').onclick=research;$mi('miTrain').onclick=train;$mi('miSaveThesis').onclick=saveThesis;$mi('miSavePortfolio').onclick=savePortfolio;$mi('miAnalyzePortfolio').onclick=analyzePortfolio;$mi('miGovernance').onclick=governance;$mi('miRefresh').onclick=()=>{research();loadTheses();analyzePortfolio();governance()};loadTheses();governance();
 })();
 </script>
 <script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(d.enabled?'COLLECTING / MONITORING':'OFFLINE');$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script>

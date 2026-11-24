@@ -2008,11 +2008,116 @@ def _chart_technical_geometry(dates, closes, candles=None):
     ha_summary=None
     if len(ha)>=3:
         tail=ha[-3:];ha_summary={"last_open":tail[-1]["open"],"last_close":tail[-1]["close"],"last_three_bullish":all(x["close"]>=x["open"] for x in tail),"method":"Heikin-Ashi transform computed from provider OHLC bars; visual smoothing, not independent market observations."}
+    # Confirmed local pivots (three bars on either side) provide reproducible swing geometry.
+    pivots=[]
+    for i in range(max(3,n-180),n-3):
+        left=max(0,i-3); right=min(n,i+4); hs=highs[left:right]; ls=lows[left:right]
+        is_high=highs[i]==max(hs) and highs[i]>max(hs[:i-left]+hs[i-left+1:])
+        is_low=lows[i]==min(ls) and lows[i]<min(ls[:i-left]+ls[i-left+1:])
+        if is_high and is_low:
+            is_high=(clean[i]-lows[i])>=(highs[i]-clean[i]); is_low=not is_high
+        if not is_high and not is_low: continue
+        point={"index":i,"date":str(dates[i]),"kind":"H" if is_high else "L","price":highs[i] if is_high else lows[i]}
+        if pivots and pivots[-1]["kind"]==point["kind"]:
+            more_extreme=point["price"]>pivots[-1]["price"] if is_high else point["price"]<pivots[-1]["price"]
+            if more_extreme:pivots[-1]=point
+        else: pivots.append(point)
+    recent_pivots=pivots[-8:]
+    harmonic=[]
+    if len(recent_pivots)>=5:
+        pat=recent_pivots[-5:]; kinds="".join(p["kind"] for p in pat)
+        if kinds in ("LHLHL","HLHLH"):
+            X,A,B,C,D=[p["price"] for p in pat]
+            xa,ab,bc,cd,ad=abs(A-X),abs(B-A),abs(C-B),abs(D-C),abs(D-A)
+            if min(xa,ab,bc,cd)>0:
+                r_ab,r_bc,r_cd,r_ad=ab/xa,bc/ab,cd/bc,ad/xa
+                common=.382<=r_bc<=.886
+                templates=(
+                    ("Gartley",abs(r_ab-.618)<=.08,1.272<=r_cd<=1.618,abs(r_ad-.786)<=.09),
+                    ("Bat",.382<=r_ab<=.50,1.618<=r_cd<=2.618,abs(r_ad-.886)<=.09),
+                    ("Butterfly",abs(r_ab-.786)<=.10,1.618<=r_cd<=2.618,1.27<=r_ad<=1.618),
+                )
+                for name,ab_ok,cd_ok,ad_ok in templates:
+                    if ab_ok and common and cd_ok and ad_ok:
+                        harmonic.append({"pattern":name,"direction":"bullish" if pat[-1]["kind"]=="L" else "bearish","pivots":[{k:v for k,v in p.items() if k!="index"} for p in pat],"ratios":{"AB_XA":r_ab,"BC_AB":r_bc,"CD_BC":r_cd,"AD_XA":r_ad},"status":"ratio match only; wait for independent price confirmation"})
+    fib_swing=None
+    if len(recent_pivots)>=2:
+        p0,p1=recent_pivots[-2:]; span=abs(p1["price"]-p0["price"])
+        if span>0:
+            ratios=(.236,.382,.5,.618,.786)
+            levels={str(r):(p1["price"]-span*r if p1["kind"]=="H" else p1["price"]+span*r) for r in ratios}
+            extensions={str(r):(p1["price"]+span*(r-1) if p1["kind"]=="H" else p1["price"]-span*(r-1)) for r in (1.272,1.618)}
+            fib_swing={"direction":"up" if p1["kind"]=="H" else "down","start":p0["price"],"end":p1["price"],"retracements":levels,"extensions":extensions,"basis":"last confirmed local swing; levels are reference zones, not predictions"}
+    # Classic floor pivots use the prior completed provider candle, never a partial current bar.
+    valid_bars=[]
+    for d in dates:
+        bar=candle_map.get(str(d))
+        if bar:
+            try:
+                o,h,l,cl=[float(bar[k]) for k in ("o","h","l","c")]
+                if o>0 and l>0 and h>=max(o,cl) and l<=min(o,cl): valid_bars.append((h,l,cl))
+            except (KeyError,TypeError,ValueError): pass
+    floor_pivots=None
+    if len(valid_bars)>=2:
+        ph,pl,pc=valid_bars[-2]; pp=(ph+pl+pc)/3
+        floor_pivots={"based_on":"prior completed OHLC candle","P":pp,"R1":2*pp-pl,"S1":2*pp-ph,"R2":pp+(ph-pl),"S2":pp-(ph-pl)}
+    def midpoint(high_values,low_values,period):
+        if len(high_values)<period:return None
+        return (max(high_values[-period:])+min(low_values[-period:]))/2
+    tenkan=midpoint(highs,lows,9); kijun=midpoint(highs,lows,26); span_b=midpoint(highs,lows,52)
+    span_a=(tenkan+kijun)/2 if tenkan is not None and kijun is not None else None
+    cloud=None
+    if span_a is not None and span_b is not None:
+        cloud={"span_a":span_a,"span_b":span_b,"top":max(span_a,span_b),"bottom":min(span_a,span_b),"price_vs_cloud":"above" if clean[-1]>max(span_a,span_b) else ("below" if clean[-1]<min(span_a,span_b) else "inside")}
+    # McGinley Dynamic adapts its effective speed to the price-to-average ratio.
+    mcginley=clean[0]; mcginley_n=14
+    for price in clean[1:]:
+        ratio=max(.01,price/mcginley)
+        mcginley += (price-mcginley)/(0.6*mcginley_n*(ratio**4))
+    # Point-and-figure summary from closes, with an ATR-sized box and a three-box reversal.
+    box=max(atr14,clean[-1]*.001); pnf=[]; direction=0; anchor=clean[0]
+    for price in clean[1:]:
+        if direction==0:
+            if price>=anchor+box: direction=1; pnf.append({"direction":"up","low":anchor,"high":price})
+            elif price<=anchor-box: direction=-1; pnf.append({"direction":"down","high":anchor,"low":price})
+        elif direction>0:
+            col=pnf[-1]
+            if price>=col["high"]+box: col["high"]=price
+            elif price<=col["high"]-3*box: direction=-1; pnf.append({"direction":"down","high":col["high"],"low":price})
+        else:
+            col=pnf[-1]
+            if price<=col["low"]-box: col["low"]=price
+            elif price>=col["low"]+3*box: direction=1; pnf.append({"direction":"up","low":col["low"],"high":price})
+    pnf_summary={"available":bool(pnf),"box_size":box,"reversal_boxes":3,"columns":len(pnf),"last_columns":pnf[-12:],"source":"close series; ATR-sized boxes; time is removed from the x-axis"}
+    reg20=regression(clean,20); reg60=regression(clean,60)
+    votes=[reg20.get("direction")=="upward",reg60.get("direction")=="upward",clean[-1]>ema20,clean[-1]>mcginley]
+    if cloud is not None:votes.append(cloud["price_vs_cloud"]=="above")
+    if ha_summary is not None:votes.append(ha_summary["last_close"]>=ha_summary["last_open"])
+    up_votes=sum(bool(v) for v in votes); score=up_votes/len(votes) if votes else None
+    trend_state="bullish confluence" if score is not None and score>=.67 else ("bearish confluence" if score is not None and score<=.33 else "mixed")
     return {"available":True,"last_close":clean[-1],"ohlc_observations":len(candle_map),"geometry_source":"provider OHLC" if len(candle_map)>=min(20,n) else "close-only proxy; intraday extrema unavailable",
-      "ranges":windows,"smoothed_transforms":{"ema20":ema20,"ema50":ema50,"sma20":sma20,"sma50":sma50,"price_vs_ema20_pct":(clean[-1]/ema20-1)*100,"price_vs_sma20_pct":(clean[-1]/sma20-1)*100,"heikin_ashi":ha_summary},
+      "ranges":windows,"confirmed_pivots":[{k:v for k,v in p.items() if k!="index"} for p in recent_pivots],"harmonic_patterns":harmonic,"fibonacci_last_swing":fib_swing,"floor_pivots":floor_pivots,
+      "ichimoku":{"tenkan_9":tenkan,"kijun_26":kijun,"senkou_a_now":span_a,"senkou_b_now":span_b,"cloud":cloud,"method":"Rolling high/low midpoints; spans are current values (not forward-shifted on this chart)."},
+      "smoothed_transforms":{"ema20":ema20,"ema50":ema50,"sma20":sma20,"sma50":sma50,"mcginley_dynamic_14":mcginley,"price_vs_ema20_pct":(clean[-1]/ema20-1)*100,"price_vs_sma20_pct":(clean[-1]/sma20-1)*100,"price_vs_mcginley_pct":(clean[-1]/mcginley-1)*100,"heikin_ashi":ha_summary},
       "volatility":{"atr14_absolute":atr14,"atr14_pct":atr14/clean[-1]*100,"ewma_20d_annualized_pct":math.sqrt(max(0,ewma_var or 0)*252)*100 if ewma_var is not None else None,"ewma_lambda":0.94},
-      "regression":{"20":regression(clean,20),"60":regression(clean,60),"120":regression(clean,120)},
+      "regression":{"20":reg20,"60":reg60,"120":regression(clean,120)},"trend_confluence":{"classification":trend_state,"bullish_components":up_votes,"components":len(votes),"score_pct":score*100 if score is not None else None,"interpretation":"Directional component agreement, not a calibrated probability."},
+      "point_and_figure":pnf_summary,
       "ratio_projection":{"ratios":[0.236,0.382,0.5,0.618,0.786,1.272,1.618],"basis":"Recent rolling swing high/low; retracement and extension levels are descriptive reference geometry."}}
+
+
+def _arima_return_diagnostics(returns):
+    """One-step ARIMA(1,1,0) log-price approximation, fit in return space; uncalibrated in-sample diagnostic."""
+    sample=[float(x) for x in returns[-252:] if math.isfinite(float(x))]
+    if len(sample)<30:return {"available":False,"reason":"At least 30 daily returns are required for an ARIMA(1,1,0) diagnostic."}
+    mu=sum(sample)/len(sample); prev=sample[:-1]; nxt=sample[1:]
+    pm=sum(prev)/len(prev); nm=sum(nxt)/len(nxt); den=sum((x-pm)**2 for x in prev)
+    phi=sum((x-pm)*(y-nm) for x,y in zip(prev,nxt))/den if den>1e-15 else 0.0
+    phi=max(-.98,min(.98,phi)); intercept=mu*(1-phi)
+    residuals=[y-(intercept+phi*x) for x,y in zip(prev,nxt)]
+    sigma=math.sqrt(sum(x*x for x in residuals)/max(1,len(residuals)-2)); sigma=max(sigma,1e-8)
+    forecast=intercept+phi*sample[-1]; z=forecast/sigma
+    probability=.5*(1+math.erf(z/math.sqrt(2)))
+    return {"available":True,"model":"ARIMA(1,1,0) on log price, estimated as AR(1) on daily log returns","phi":phi,"next_return_pct":forecast*100,"residual_volatility_pct":sigma*100,"next_session_positive_probability":probability,"trend_probability_up":probability,"forecast_interval_95_pct":[(forecast-1.96*sigma)*100,(forecast+1.96*sigma)*100],"calibrated":False,"interpretation":"Gaussian one-step model probability; requires rolling out-of-sample calibration before use as a trading probability."}
 
 
 def chart_quantitative_intelligence(dates, closes, candles=None):
@@ -2023,8 +2128,12 @@ def chart_quantitative_intelligence(dates, closes, candles=None):
         if a>0 and b>0:
             r=math.log(b/a)
             if math.isfinite(r): returns.append(r)
+    arima=_arima_return_diagnostics(returns)
+    if arima.get("available") and closes:
+        last=float(closes[-1]); lo,hi=arima["forecast_interval_95_pct"]
+        arima["next_session_price_range_95"]=[last*math.exp(lo/100),last*math.exp(hi/100)]
     if len(returns)<80:
-        return {"available":False,"reason":"At least 80 valid daily log returns are required for fitted Bayesian/regime diagnostics; price geometry may still be available.","as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),"bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},"derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None},"price_action_geometry":technical}
+        return {"available":False,"reason":"At least 80 valid daily log returns are required for fitted Bayesian/regime diagnostics; price geometry may still be available.","as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),"bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},"arima":arima,"derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None},"price_action_geometry":technical}
     n=len(returns); mu=sum(returns)/n
     # Conjugate Normal-Normal posterior for the historical mean; not a next-day direction probability.
     obs_var=sum((x-mu)**2 for x in returns)/(n-1); obs_var=max(obs_var,1e-12)
@@ -2041,7 +2150,7 @@ def chart_quantitative_intelligence(dates, closes, candles=None):
       "bayesian_drift":{"probability_positive":p_positive,"posterior_mean_pct":post_mean*100,"posterior_sd_pct":math.sqrt(post_var)*100,"prior":"Normal(0, 0.5% per session)","interpretation":"Posterior sign probability for mean historical daily log return; not probability of next-session price increase."},
       "kalman":{"trend_pct_per_session":state*100,"state_variance":state_var,"process_variance":q,"observation_variance":obs_var,"method":"Scalar local-level filter; process variance fixed at 1% of sample observation variance."},
       "garch":garch or {"next_volatility_pct":None,"fit":"Unavailable: constrained likelihood fit failed"},
-      "hmm":hmm,
+      "hmm":hmm,"arima":arima,
       "derivative_features":{"first_difference_daily_log_return":first,"second_difference_change_in_daily_log_return":second},
       "optimization":{"solver":"No directional optimizer: no validated portfolio objective or constraints were supplied","curvature":None},
       "price_action_geometry":technical}
@@ -3188,12 +3297,15 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=="/api/model/train":
                 symbol=str(payload.get("symbol","")).upper().strip()
                 typ=str(payload.get("type","equity")).lower().strip()
-                aliases={"NDX":"NASDAQ100","^NDX":"NASDAQ100","^NDX100":"NASDAQ100","SPX":"SP500","^GSPC":"SP500","^SPX":"SP500","DJI":"DJIA","^DJI":"DJIA"}
+                aliases={"NASDAQ-100":"NASDAQ100","NDX":"NASDAQ100","^NDX":"NASDAQ100","^NDX100":"NASDAQ100","SPX":"SP500","^GSPC":"SP500","^SPX":"SP500","DJI":"DJIA","^DJI":"DJIA"}
                 symbol=aliases.get(symbol,symbol)
                 if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("Enter a valid ticker or one of the supported indices: NASDAQ100, SP500, DJIA.")
                 if typ not in ("index","equity"):
                     typ="index" if symbol in ASSET_INDEX_SERIES else "equity"
+                # The UI's current explorer filter can be stale when a user types a stock ticker.
+                # Canonical supported index symbols win; any other valid symbol is treated as an equity request.
                 if symbol in ASSET_INDEX_SERIES: typ="index"
+                elif typ=="index": typ="equity"
                 if typ=="index":
                     if symbol not in ASSET_INDEX_SERIES: raise ValueError("Unsupported index. Choose NASDAQ100, SP500 or DJIA, or select Stocks & ETFs for a ticker.")
                     if symbol=="NASDAQ100":
