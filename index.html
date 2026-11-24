@@ -43,8 +43,63 @@ input,select,textarea,.assetbar input,.assetbar select,.assettools input,.assett
 .grid2,.netgrid,.charts,.top{align-items:start!important}.brain{align-self:start!important;height:370px!important;min-height:0!important}.stack{align-self:start!important;min-height:0}.grid2>.panel,.netgrid>.panel,.charts>.panel{align-self:start!important}.grid2{grid-auto-rows:max-content!important}.netgrid{grid-auto-rows:max-content!important}
 @media(max-width:760px){.theme-switch{width:100%;justify-content:center}.theme-switch span{margin-right:auto}.top-actions{flex-wrap:wrap;justify-content:flex-end}.brain{height:320px!important}}
 </style>
+<style id="mira-chatgpt-dark-theme">
+/* MIRA unified ChatGPT-style dark appearance */
+:root{
+ color-scheme:dark!important;
+ --bg:#212121!important; --p:#242424!important; --p2:#1f1f1f!important;
+ --line:#343434!important; --txt:#e6e6e6!important; --muted:#969696!important;
+ --teal:#10a37f!important; --blue:#8ab4f8!important; --amber:#e5b567!important;
+ --red:#f07878!important; --green:#54c79a!important;
+ --panel:#242424!important; --text:#e6e6e6!important;
+ --ui-bg:#212121!important; --ui-surface:#212121!important; --ui-card:#242424!important;
+ --ui-raised:#292929!important; --ui-border:#343434!important; --ui-text:#e6e6e6!important;
+ --ui-muted:#969696!important; --ui-accent:#10a37f!important; --ui-accent-soft:#183b32!important;
+ --ui-brain:#242424!important; --ui-input:#1f1f1f!important;
+ --ui-warn-bg:#3b3325!important; --ui-warn:#e5b567!important; --ui-danger:#f07878!important;
+}
+html,body{background:#212121!important;background-image:none!important;color:#e6e6e6!important;color-scheme:dark!important}
+body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif!important}
+.app,main,.main,.layout,.stack,.content{background:transparent!important;color:#e6e6e6!important}
+.top,header,.top header{background:#212121!important;background-image:none!important;border-color:#292929!important;color:#e6e6e6!important;box-shadow:none!important;backdrop-filter:none!important}
+.rail{background:#171717!important;border-color:#292929!important}
+.rail a{color:#a3a3a3!important}
+.rail a:hover,.rail a.active{background:#242424!important;color:#e6e6e6!important}
+.metric,.panel,.card,.mira-intel,.mira-learning,.assetbar,.assettools,.mi-card,.mi-stat,.stat,.unavailable,.railsmall{
+ background:#262626!important;background-image:none!important;border:1px solid #343434!important;color:#e6e6e6!important;box-shadow:none!important
+}
+.metric strong,.metric b,.stat b,.mi-stat b,.mira-learning b,.brand,h1,h2,h3,h4,.intro h1,.braincap b,.brainhud b{color:#e6e6e6!important}
+.metric small,.cap,.muted,.intro p,.asof,.soft,.sub,.note,.mi-note,.braincap div,.brainfoot,.brainhud small,.panel h2,.head h2{color:#969696!important}
+.brain{background:#242424!important;background-image:none!important;border-color:#343434!important;box-shadow:none!important}
+.brain:after{opacity:.35!important}
+.ring:before{background:#242424!important}
+.gauge,.bar,.liveprogress{background:#343434!important}
+.stat,.layerinfo span,.mi-item,.mira-learning-stats>div,.mira-learning-sources span{background:#292929!important;border:1px solid #343434!important;color:#bdbdbd!important}
+button,.mi-card button,.mira-intel-head button{background:#10a37f!important;border:1px solid #10a37f!important;color:#fff!important;box-shadow:none!important;border-radius:8px!important}
+button:hover,.mi-card button:hover,.mira-intel-head button:hover{background:#0e8f70!important;filter:none!important}
+button.secondary{background:#292929!important;color:#e6e6e6!important;border:1px solid #383838!important}
+input,select,textarea,.assetbar input,.assetbar select,.assettools input,.assettools select,.mi-card input,.mi-card textarea{
+ background:#1f1f1f!important;color:#e6e6e6!important;border:1px solid #3a3a3a!important;color-scheme:dark!important
+}
+input::placeholder,textarea::placeholder{color:#8e8e8e!important}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid #10a37f!important;outline-offset:1px!important}
+.table,.table table{background:transparent!important;color:#e6e6e6!important}
+.table td,.table th{border-color:#343434!important;color:#d4d4d4!important}
+.table th{color:#969696!important}
+.trace,.trace div,.trace pre{color:#bdbdbd!important;border-color:#343434!important}
+.foot{border-color:#343434!important;color:#969696!important}
+.pill,.chip{background:#183b32!important;color:#5fd6b1!important;border-color:#285c4d!important}
+.warning{background:#3b3325!important;border-color:#655334!important;color:#e5b567!important}
+.unavailable{color:#a3a3a3!important}.unavailable b{color:#e5b567!important}
+.mi-item a,.buy{color:#5fd6b1!important}.sell{color:#f07878!important}.hold{color:#e5b567!important}
+#tip{background:#1f1f1f!important;color:#e6e6e6!important;border:1px solid #3a3a3a!important;box-shadow:0 8px 24px #0008!important}
+svg text{fill:#d4d4d4}
+canvas{background:transparent!important}
+hr{border-color:#343434!important}
+@media(prefers-color-scheme:light){html,body{color-scheme:dark!important;background:#212121!important;color:#e6e6e6!important}}
+</style>
 </head><body><div class="app">
-<header class="top"><div class="brand"><i>◉</i> MIRA <span class="muted">/ MARKET INSIGHT &amp; RISK ASSISTANT</span></div><div class="top-actions"><div style="display:flex;gap:7px;align-items:center"><button id="viewToggle" class="secondary" style="padding:6px 9px;font-size:10px">Switch to client view</button><span class="pill">RESEARCH CONSOLE</span> <a href="/live" class="pill" style="text-decoration:none">LIVE CHART</a> <span class="pill" id="ollama">CHAT · CHECKING</span></div><div class="theme-switch" role="group" aria-label="Appearance"><span>APPEARANCE</span><button type="button" data-theme-choice="daylight" aria-pressed="false" title="Daylight theme">Day</button><button type="button" data-theme-choice="comfort" aria-pressed="false" title="Comfort theme">Comfort</button><button type="button" data-theme-choice="night" aria-pressed="false" title="Night theme">Night</button></div></div></header>
+<header class="top"><div class="brand"><i>◉</i> MIRA <span class="muted">/ MARKET INSIGHT &amp; RISK ASSISTANT</span></div><div class="top-actions"><div style="display:flex;gap:7px;align-items:center"><button id="viewToggle" class="secondary" style="padding:6px 9px;font-size:10px">Switch to client view</button><span class="pill">RESEARCH CONSOLE</span> <a href="/live" class="pill" style="text-decoration:none">LIVE CHART</a> <span class="pill" id="ollama">CHAT · CHECKING</span></div></div></header>
 <div class="layout"><aside class="rail"><nav><a class="active" href="#overview">◉ &nbsp; Neural overview</a><a href="#markets">⌁ &nbsp; Market outlook</a><a href="#evaluation">▤ &nbsp; Model evaluation</a><a href="#agent">⌘ &nbsp; Agent console</a><a href="#sandbox">⬡ &nbsp; Sandbox lab</a><a href="#integrity">◎ &nbsp; System integrity</a></nav><div class="railsmall"><b>ACTIVE SERIES · NDX</b><br>Daily history · Research only<br>Pre-market feed disconnected</div></aside>
 <main class="main">
 <section class="intro" id="overview"><div><div class="eyebrow">NEURAL MARKET EXPERIMENT · 01</div><h1>MIRA market research console</h1><p>Inspect the network, market outlook, and how it scores on unseen history.</p></div><div class="asof"><span class="pill">9 PYTHON MLPs · 3 TASKS × 3 MEMBERS</span><br><span id="asof">Loading saved run…</span></div></section>
@@ -326,12 +381,5 @@ boot();
  async function train(){const s=sym(),type=($mi('assetClass')&&$mi('assetClass').value)||'equity';$mi('miTrain').disabled=true;$mi('miResearchStatus').textContent='Training '+s+' with purged chronological splits…';try{const d=await post('/api/model/train',{symbol:s,type});$mi('miResearchStatus').textContent='Model '+(d.model.status||'stored')+' for '+s+' · holdout Brier '+Number(d.model.holdout.brier).toFixed(4)+' · AUC '+(d.model.holdout.auc==null?'unavailable':Number(d.model.holdout.auc).toFixed(3))+' · data through '+d.model.data_as_of;await governance()}catch(e){$mi('miResearchStatus').textContent='Training unavailable: '+e.message+'. Training is owner-only on the hosted service; run it from the private owner environment.'}finally{$mi('miTrain').disabled=false}}
  $mi('miResearch').onclick=research;$mi('miTrain').onclick=train;$mi('miSaveThesis').onclick=saveThesis;$mi('miSavePortfolio').onclick=savePortfolio;$mi('miAnalyzePortfolio').onclick=analyzePortfolio;$mi('miGovernance').onclick=governance;$mi('miRefresh').onclick=()=>{research();loadTheses();analyzePortfolio();governance()};loadTheses();governance();
 })();
-</script><script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(d.enabled?'COLLECTING / MONITORING':'OFFLINE');$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script><script>
-(function(){
- const key='mira-appearance-v1',allowed=['daylight','comfort','night'];
- function apply(theme){if(!allowed.includes(theme))theme='comfort';document.body.dataset.theme=theme;try{localStorage.setItem(key,theme)}catch(e){}document.querySelectorAll('[data-theme-choice]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.themeChoice===theme)));}
- let saved='comfort';try{saved=localStorage.getItem(key)||'comfort'}catch(e){}apply(saved);
- document.addEventListener('click',e=>{const b=e.target.closest('[data-theme-choice]');if(b)apply(b.dataset.themeChoice)});
-})();
-</script>
+</script><script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(d.enabled?'COLLECTING / MONITORING':'OFFLINE');$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script>
 </body></html>

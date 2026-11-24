@@ -1947,22 +1947,91 @@ def _fit_two_state_vol_hmm(returns, iterations=35):
     return {"high_volatility_probability_next":max(0.0,min(1.0,prob_high)),"fit_rows":n,"state_variances_pct2":[variances[0]*10000,variances[1]*10000],"transition_matrix":trans,"status":"Fitted two-state Gaussian volatility HMM by Baum-Welch EM; in-sample regime estimate."}
 
 
-def chart_quantitative_intelligence(dates, closes):
-    """Causal statistical diagnostics; fitted models disclose estimation method and sample size."""
+def _chart_technical_geometry(dates, closes, candles=None):
+    """Descriptive price geometry and smoothing; projections are conditional reference levels, not forecasts."""
+    n=len(closes)
+    if n<20:
+        return {"available":False,"reason":"At least 20 valid closes are required for technical geometry."}
+    clean=[float(x) for x in closes if x is not None and math.isfinite(float(x)) and float(x)>0]
+    if len(clean)!=n or len(clean)<20:
+        return {"available":False,"reason":"Price series contains missing or invalid closes."}
+    def ema(values, span):
+        alpha=2/(span+1); out=[]; value=values[0]
+        for x in values:
+            value=alpha*x+(1-alpha)*value; out.append(value)
+        return out
+    def regression(values, window):
+        z=values[-min(window,len(values)):]; m=len(z)
+        if m<10:return {"observations":m,"slope_pct_per_20_sessions":None,"r_squared":None,"direction":"insufficient data"}
+        y=[math.log(x) for x in z]; xm=(m-1)/2; ym=sum(y)/m
+        den=sum((i-xm)**2 for i in range(m))
+        slope=sum((i-xm)*(y[i]-ym) for i in range(m))/den if den else 0.0
+        intercept=ym-slope*xm; ss_tot=sum((v-ym)**2 for v in y); ss_res=sum((y[i]-(intercept+slope*i))**2 for i in range(m))
+        r2=max(0.0,min(1.0,1-ss_res/ss_tot)) if ss_tot>1e-15 else 0.0
+        return {"observations":m,"slope_pct_per_20_sessions":(math.exp(slope*20)-1)*100,"r_squared":r2,"direction":"upward" if slope>1e-8 else ("downward" if slope< -1e-8 else "flat")}
+    # Prefer real OHLC extrema; otherwise disclose that the geometry is close-only.
+    candle_map={str(c.get("d")):c for c in (candles or []) if isinstance(c,dict) and c.get("d")}
+    highs=[]; lows=[]; trs=[]; ha=[]
+    prev_close=None; ha_open=None; ha_close_prev=None
+    for i,(d,c) in enumerate(zip(dates,clean)):
+        bar=candle_map.get(str(d))
+        if bar:
+            try:
+                o,h,l,cl=[float(bar[k]) for k in ("o","h","l","c")]
+                if not (o>0 and l>0 and h>=max(o,cl) and l<=min(o,cl)): raise ValueError()
+                highs.append(h); lows.append(l); tr=max(h-l,abs(h-prev_close) if prev_close else h-l,abs(l-prev_close) if prev_close else h-l)
+                hc=(o+h+l+cl)/4; ho=(o+cl)/2 if ha_open is None else (ha_open+ha_close_prev)/2
+                ha.append({"open":ho,"close":hc,"high":max(h,ho,hc),"low":min(l,ho,hc)})
+                ha_open,ha_close_prev=ho,hc
+            except (KeyError,TypeError,ValueError):
+                highs.append(c);lows.append(c);tr=abs(c-prev_close) if prev_close else 0
+        else:
+            highs.append(c);lows.append(c);tr=abs(c-prev_close) if prev_close else 0
+        trs.append(tr);prev_close=c
+    def window_geometry(w):
+        k=min(w,n); hh=max(highs[-k:]); ll=min(lows[-k:]); span=max(0.0,hh-ll); last=clean[-1]
+        ratios=(0.236,0.382,0.5,0.618,0.786)
+        return {"window_sessions":k,"swing_high":hh,"swing_low":ll,"range_pct_of_last":span/last*100,
+          "fib_retracements_from_high":{str(r):hh-span*r for r in ratios},
+          "fib_extensions_from_low":{str(r):ll+span*r for r in (1.0,1.272,1.618)},
+          "measured_move_up_if_breakout":hh+span,"measured_move_down_if_breakdown":ll-span,
+          "interpretation":"Conditional geometric levels from the observed range; not support/resistance guarantees or price targets."}
+    windows={str(w):window_geometry(w) for w in (20,60,120) if n>=w}
+    ema20=ema(clean,20)[-1]; ema50=ema(clean,50)[-1] if n>=50 else None
+    sma20=sum(clean[-20:])/20; sma50=sum(clean[-50:])/50 if n>=50 else None
+    atr14=sum(trs[-14:])/min(14,len(trs))
+    rets=[math.log(clean[i]/clean[i-1]) for i in range(1,n)]
+    ewma_var=None
+    if rets:
+        ewma_var=sum(x*x for x in rets[:min(20,len(rets))])/min(20,len(rets))
+        for r in rets[min(20,len(rets)):]: ewma_var=.94*ewma_var+.06*r*r
+    ha_summary=None
+    if len(ha)>=3:
+        tail=ha[-3:];ha_summary={"last_open":tail[-1]["open"],"last_close":tail[-1]["close"],"last_three_bullish":all(x["close"]>=x["open"] for x in tail),"method":"Heikin-Ashi transform computed from provider OHLC bars; visual smoothing, not independent market observations."}
+    return {"available":True,"last_close":clean[-1],"ohlc_observations":len(candle_map),"geometry_source":"provider OHLC" if len(candle_map)>=min(20,n) else "close-only proxy; intraday extrema unavailable",
+      "ranges":windows,"smoothed_transforms":{"ema20":ema20,"ema50":ema50,"sma20":sma20,"sma50":sma50,"price_vs_ema20_pct":(clean[-1]/ema20-1)*100,"price_vs_sma20_pct":(clean[-1]/sma20-1)*100,"heikin_ashi":ha_summary},
+      "volatility":{"atr14_absolute":atr14,"atr14_pct":atr14/clean[-1]*100,"ewma_20d_annualized_pct":math.sqrt(max(0,ewma_var or 0)*252)*100 if ewma_var is not None else None,"ewma_lambda":0.94},
+      "regression":{"20":regression(clean,20),"60":regression(clean,60),"120":regression(clean,120)},
+      "ratio_projection":{"ratios":[0.236,0.382,0.5,0.618,0.786,1.272,1.618],"basis":"Recent rolling swing high/low; retracement and extension levels are descriptive reference geometry."}}
+
+
+def chart_quantitative_intelligence(dates, closes, candles=None):
+    """Causal statistics plus price geometry; no diagnostic is silently converted into a trade signal."""
+    technical=_chart_technical_geometry(dates,closes,candles)
     returns=[]
     for a,b in zip(closes[:-1],closes[1:]):
         if a>0 and b>0:
             r=math.log(b/a)
             if math.isfinite(r): returns.append(r)
     if len(returns)<80:
-        return {"available":False,"reason":"At least 80 valid daily log returns are required for the fitted regime and volatility diagnostics.","as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),"bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},"derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None}}
+        return {"available":False,"reason":"At least 80 valid daily log returns are required for fitted Bayesian/regime diagnostics; price geometry may still be available.","as_of_date":dates[-1] if dates else None,"as_of_returns":len(returns),"bayesian_drift":{},"kalman":{},"garch":{},"hmm":{},"derivative_features":{},"optimization":{"solver":"Not run: insufficient observations","curvature":None},"price_action_geometry":technical}
     n=len(returns); mu=sum(returns)/n
-    # Conjugate Normal-Normal posterior; posterior probability is not a directional trading edge.
+    # Conjugate Normal-Normal posterior for the historical mean; not a next-day direction probability.
     obs_var=sum((x-mu)**2 for x in returns)/(n-1); obs_var=max(obs_var,1e-12)
     prior_mean=0.0; prior_var=.005**2
     post_var=1/(1/prior_var+n/obs_var); post_mean=post_var*(prior_mean/prior_var+n*mu/obs_var)
     z=post_mean/math.sqrt(post_var); p_positive=.5*(1+math.erf(z/math.sqrt(2)))
-    # Local-level Kalman filter; process noise fixed at 1% of sample observation variance.
+    # Scalar local-level Kalman filter with disclosed fixed process-noise ratio.
     q=max(obs_var*.01,1e-12); state=prior_mean; state_var=prior_var
     for obs in returns:
         state_var+=q; gain=state_var/(state_var+obs_var); state+=gain*(obs-state); state_var=(1-gain)*state_var
@@ -1974,7 +2043,8 @@ def chart_quantitative_intelligence(dates, closes):
       "garch":garch or {"next_volatility_pct":None,"fit":"Unavailable: constrained likelihood fit failed"},
       "hmm":hmm,
       "derivative_features":{"first_difference_daily_log_return":first,"second_difference_change_in_daily_log_return":second},
-      "optimization":{"solver":"No directional optimizer: no validated portfolio objective or constraints were supplied","curvature":None}}
+      "optimization":{"solver":"No directional optimizer: no validated portfolio objective or constraints were supplied","curvature":None},
+      "price_action_geometry":technical}
 
 def chart_fast_verdict(dates, closes, brain):
     """Separate downside-risk alarm from trend direction; never relabel risk as BUY/SELL."""
@@ -2210,7 +2280,7 @@ def asset_chart_payload(symbol, asset_type="equity", days=180):
             reason=(latest_run.get("promotion_reason") if latest_run else "No symbol-specific model has completed chronological training and untouched holdout evaluation.")
             verdict={"verdict":"NO VALIDATED CALL","confidence":"N/A","interim":True,"decision_status":"CHALLENGER_NOT_PROMOTED" if latest_run else "SYMBOL_MODEL_NOT_TRAINED","decision_reason":reason,"risk_score":None,"alarm_level":None,"risk_alarm_active":None,"fusion":{"available":False,"reason":"No promoted symbol-specific model is available."}}
             model_scope="Challenger model not promoted; previous champion retained and no unvalidated probability is served." if latest_run else "No validated neural forecast for this instrument. Train a symbol-specific risk model before displaying a risk probability."
-    q=chart_quantitative_intelligence(dates,closes)
+    q=chart_quantitative_intelligence(dates,closes,candles)
     payload={"symbol":symbol,"instrument_type":asset_type,"chart_instrument":symbol,
         "chart_source":source,"dates":dates,"closes":[round(x,4) for x in closes],
         "candles":candles,"intraday_candles":intraday,"intraday_status":{"status":"available" if intraday else "not available for this feed","bars":len(intraday)},
@@ -3116,14 +3186,27 @@ class Handler(SimpleHTTPRequestHandler):
                 else: result=_save_thesis(ws,payload)
             elif path=="/api/portfolio": result=_portfolio_save(_workspace(self),payload.get("holdings",[]))
             elif path=="/api/model/train":
-                symbol=str(payload.get("symbol","")).upper(); typ=str(payload.get("type","equity"))
+                symbol=str(payload.get("symbol","")).upper().strip()
+                typ=str(payload.get("type","equity")).lower().strip()
+                aliases={"NDX":"NASDAQ100","^NDX":"NASDAQ100","^NDX100":"NASDAQ100","SPX":"SP500","^GSPC":"SP500","^SPX":"SP500","DJI":"DJIA","^DJI":"DJIA"}
+                symbol=aliases.get(symbol,symbol)
+                if not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol): raise ValueError("Enter a valid ticker or one of the supported indices: NASDAQ100, SP500, DJIA.")
+                if typ not in ("index","equity"):
+                    typ="index" if symbol in ASSET_INDEX_SERIES else "equity"
+                if symbol in ASSET_INDEX_SERIES: typ="index"
                 if typ=="index":
-                    if symbol not in ASSET_INDEX_SERIES: raise ValueError("Unsupported index.")
-                    if symbol=="NASDAQ100": raise ValueError("Nasdaq-100 already has its own neural risk brain. Use the existing brain retraining workflow instead of creating a duplicate asset model.")
-                    rows=_fred_series_all(ASSET_INDEX_SERIES[symbol],1000); dates=[x[0] for x in rows]; closes=[x[1] for x in rows]
+                    if symbol not in ASSET_INDEX_SERIES: raise ValueError("Unsupported index. Choose NASDAQ100, SP500 or DJIA, or select Stocks & ETFs for a ticker.")
+                    if symbol=="NASDAQ100":
+                        job=start_brain_job(force=True)
+                        result={"trained":False,"started":bool(job.get("started")),"workflow":"nasdaq100_neural_brain","message":job.get("message"),"job":job}
+                    else:
+                        rows=_fred_series_all(ASSET_INDEX_SERIES[symbol],1000)
+                        if len(rows)<260: raise ValueError("FRED returned fewer than 260 daily observations for "+symbol+"; model training was not started.")
+                        dates=[x[0] for x in rows]; closes=[x[1] for x in rows]
+                        result={"trained":True,"model":_train_asset_model(symbol,typ,dates,closes)}
                 else:
                     d=asset_chart_payload(symbol,"equity",1000); dates=d["dates"]; closes=d["closes"]
-                result={"trained":True,"model":_train_asset_model(symbol,typ,dates,closes)}
+                    result={"trained":True,"model":_train_asset_model(symbol,typ,dates,closes)}
             elif path=="/api/market-data/config":
                 key=str(payload.get("key","")).strip(); secret=str(payload.get("secret","")).strip()
                 if payload.get("clear") is True:
