@@ -2094,7 +2094,7 @@ def _chart_technical_geometry(dates, closes, candles=None):
     if cloud is not None:votes.append(cloud["price_vs_cloud"]=="above")
     if ha_summary is not None:votes.append(ha_summary["last_close"]>=ha_summary["last_open"])
     up_votes=sum(bool(v) for v in votes); score=up_votes/len(votes) if votes else None
-    trend_state="bullish confluence" if score is not None and score>=.67 else ("bearish confluence" if score is not None and score<=.33 else "mixed")
+    trend_state="bullish confluence" if score is not None and score>=2/3 else ("bearish confluence" if score is not None and score<=1/3 else "mixed")
     return {"available":True,"last_close":clean[-1],"ohlc_observations":len(candle_map),"geometry_source":"provider OHLC" if len(candle_map)>=min(20,n) else "close-only proxy; intraday extrema unavailable",
       "ranges":windows,"confirmed_pivots":[{k:v for k,v in p.items() if k!="index"} for p in recent_pivots],"harmonic_patterns":harmonic,"fibonacci_last_swing":fib_swing,"floor_pivots":floor_pivots,
       "ichimoku":{"tenkan_9":tenkan,"kijun_26":kijun,"senkou_a_now":span_a,"senkou_b_now":span_b,"cloud":cloud,"method":"Rolling high/low midpoints; spans are current values (not forward-shifted on this chart)."},

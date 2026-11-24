@@ -167,7 +167,7 @@ hr{border-color:#343434!important}
   </div>
 </header>
 <main>
-<section class="mira-learning" id="miraLearning"><div class="mira-learning-head"><div><b>MIRA AUTONOMOUS LEARNING</b><small>Continuous evidence ingestion · delayed outcome grading · governed model updates</small></div><span id="mlState">CONNECTING</span></div><div class="mira-learning-stats"><div><b id="mlEvents">—</b><small>Evidence events stored</small></div><div><b id="mlGraded">—</b><small>Forecasts graded</small></div><div><b id="mlPending">—</b><small>Forecasts awaiting outcomes</small></div><div><b id="mlTrained">—</b><small>Model trained through</small></div></div><div id="mlSources" class="mira-learning-sources">Waiting for ingestion status…</div><p id="mlPolicy">New observations are retained; model updates require matured labels and chronological validation.</p></section>
+<section class="mira-learning" id="miraLearning"><div class="mira-learning-head"><div><b>MIRA EVIDENCE &amp; LEARNING STATUS</b><small>Source capture · matured outcome grading · validated model updates</small></div><span id="mlState">CONNECTING</span></div><div class="mira-learning-stats"><div><b id="mlEvents">—</b><small>Evidence events stored</small></div><div><b id="mlGraded">—</b><small>Forecasts graded</small></div><div><b id="mlPending">—</b><small>Forecasts awaiting outcomes</small></div><div><b id="mlTrained">—</b><small>Model trained through</small></div></div><div id="mlSources" class="mira-learning-sources">Waiting for ingestion status…</div><p id="mlPolicy">New observations are retained; model updates require matured labels and chronological validation.</p></section>
   <section class="top">
     <div class="card" id="verdictCard"><h2>Model's view right now</h2><div class="sub">Loading…</div></div>
     <div class="card" id="scoreCard"><h2>How often is it right? (days it never saw)</h2><div class="sub">Loading…</div></div>
@@ -314,11 +314,13 @@ function renderSelectedAssetCards(){
   const fused=v.fusion&&v.fusion.available?v.fusion.next_session_up_probability:null;
   const pUp=fused!=null?fused:ar.next_session_positive_probability;
   const isValidated=fused!=null&&v.fusion&&v.fusion.calibrated===true;
-  const lean=pUp==null?'ESTIMATE UNAVAILABLE':(pUp>=.52?'UPWARD LEAN':(pUp<=.48?'DOWNWARD LEAN':'MIXED / NEUTRAL'));
-  const leanClass=pUp==null?'hold':(pUp>=.52?'buy':(pUp<=.48?'sell':'hold'));
+  const trendName=(trend.classification||'').toLowerCase();
+  const alignedRegression=r20.direction&&r60.direction&&r20.direction===r60.direction?r20.direction:null;
+  const trendRead=trendName.includes('bullish')?'UPTREND':(trendName.includes('bearish')?'DOWNTREND':(alignedRegression==='upward'?'UPTREND':(alignedRegression==='downward'?'DOWNTREND':(trend.score_pct!=null&&trend.score_pct>=60?'UPWARD TREND EVIDENCE':(trend.score_pct!=null&&trend.score_pct<=40?'DOWNWARD TREND EVIDENCE':'MIXED TREND')))));
+  const leanClass=trendRead.startsWith('UP')?'buy':(trendRead.startsWith('DOWN')?'sell':'hold');
   const risk=v.risk_score,alarm=v.alarm_level,riskAvailable=risk!=null&&alarm!=null;
   let h='<h2>Selected ticker · '+esc(symbol)+'</h2>';
-  h+='<div class="verdict"><div class="arrow '+leanClass+'">'+(pUp==null?'—':pUp>=.52?'▲':pUp<=.48?'▼':'■')+'</div><div><div class="big '+leanClass+'">'+lean+'</div><div class="sub">Next-session up estimate: <b>'+pp(pUp)+'</b> · '+(isValidated?'validated model':'uncalibrated ARIMA diagnostic')+' · data through '+esc(d.as_of||'—')+'</div></div></div>';
+  h+='<div class="verdict"><div class="arrow '+leanClass+'">'+(trendRead.startsWith('UP')?'▲':trendRead.startsWith('DOWN')?'▼':'■')+'</div><div><div class="big '+leanClass+'">'+trendRead+'</div><div class="sub">Trend reading from this ticker’s 20/60-session regressions and indicator confluence · descriptive, not a probability · data through '+esc(d.as_of||'—')+'</div><div class="sub">Next-session P(up): <b>'+pp(pUp)+'</b> · '+(isValidated?'validated directional model':'uncalibrated price-only ARIMA estimate')+'</div></div></div>';
   h+='<div class="stats" style="margin-top:14px">'+
     '<div class="stat"><b>'+(last==null?'Unavailable':num(last))+'</b><span>'+esc(symbol)+' latest close</span></div>'+
     '<div class="stat"><b>'+pp(change(20))+'</b><span>Price change · 20 sessions</span></div>'+
@@ -356,9 +358,11 @@ function renderCards(){
   else{
     const unavailable=['DIRECTIONAL_FUSION_UNAVAILABLE','NO_VALIDATED_DIRECTIONAL_EDGE','STALE_MARKET_DATA','HORIZON_UNSUPPORTED','SYMBOL_MODEL_NOT_TRAINED'].includes(v.decision_status);
     const risk=Number(v.risk_score), alarm=Number(v.alarm_level),validRisk=Number.isFinite(risk)&&Number.isFinite(alarm)&&alarm>0,riskAlert=validRisk&&risk>=alarm;
-    const verdict=validRisk?(riskAlert?'DOWNSIDE-RISK ALERT':'NO DOWNSIDE-RISK ALERT'):(unavailable?'NO VALIDATED CALL':'MODEL STATUS UNAVAILABLE');
-    const cls=validRisk&&riskAlert?'sell':'hold', icon=validRisk&&riskAlert?'▼':'■';
-    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">This is an 8% drawdown-risk alert over 21 sessions, not a next-session direction call · data through '+esc(v.as_of||data.as_of||'—')+'</div></div></div>';
+    const evalAcc=sb.risk_classification_accuracy??sb.call_accuracy,evalBase=sb.no_alert_baseline_accuracy??sb.always_buy_accuracy,belowBaseline=sb.available&&evalAcc!=null&&evalBase!=null&&evalAcc<evalBase;
+    const verdict=validRisk?(belowBaseline?'EXPERIMENTAL RISK ALERT':(riskAlert?'DOWNSIDE-RISK ALERT':'NO DOWNSIDE-RISK ALERT')):(unavailable?'NO VALIDATED CALL':'MODEL STATUS UNAVAILABLE');
+    const cls=validRisk&&riskAlert&&!belowBaseline?'sell':'hold', icon=validRisk&&riskAlert&&!belowBaseline?'▼':'■';
+    h+='<div class="verdict"><div class="arrow '+cls+'">'+icon+'</div><div><div class="big '+cls+'">'+verdict+'</div><div class="sub">This is an 8% drawdown-risk estimate over 21 sessions, not a next-session direction call · data through '+esc(v.as_of||data.as_of||'—')+'</div></div></div>';
+    if(belowBaseline)h+='<div class="warning" style="margin-top:10px;padding:9px 11px;border-radius:7px">The held-out risk classifier scores '+pp(evalAcc)+' accuracy versus '+pp(evalBase)+' for a no-alert baseline. It underperforms that baseline and should not be treated as a useful trade edge.</div>';
     h+='<div class="stats" style="margin-top:14px">';
     const pUp=f.next_session_up_probability!=null?f.next_session_up_probability:ar.next_session_positive_probability;
     const pUpLabel=f.next_session_up_probability!=null?'Validated ensemble P(next close up)':'ARIMA P(next close up) · uncalibrated';
@@ -391,7 +395,8 @@ function renderCards(){
      +'<div class="stat"><b>'+pct(sb.drops_caught,0)+'</b><span>Of actual 8%+ drawdowns detected</span></div>'
      +'<div class="stat"><b>'+pct(sb.alarm_precision,0)+'</b><span>Alerts followed by an 8%+ drawdown (base rate '+pct(sb.drop_base_rate,0)+')</span></div>'
      +'</div>';
-    if(sb.strategy&&sb.buy_and_hold) s+='<div class="sub" style="margin-top:10px">Historical strategy simulation: '+pct(sb.strategy.cagr)+'/yr, worst drawdown '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold '+pct(sb.buy_and_hold.cagr)+'/yr, worst drawdown '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' held-out days). Historical only.</div>';
+    if(worse)s+='<div class="warning" style="margin-top:9px;padding:9px 11px;border-radius:7px">Below the no-alert baseline by '+((baseline-accuracy)*100).toFixed(1)+' percentage points. AUC measures ranking rather than accuracy; it does not erase this baseline failure.</div>';
+    if(sb.strategy&&sb.buy_and_hold){s+='<div class="sub" style="margin-top:10px">Historical strategy simulation: '+pct(sb.strategy.cagr)+'/yr, worst drawdown '+pct(sb.strategy.max_drawdown,0)+' · buy-and-hold '+pct(sb.buy_and_hold.cagr)+'/yr, worst drawdown '+pct(sb.buy_and_hold.max_drawdown,0)+' ('+sb.days+' held-out days). Historical only.</div>';if(sb.strategy.cagr<sb.buy_and_hold.cagr)s+='<div class="warning" style="margin-top:8px;padding:9px 11px;border-radius:7px">The historical strategy lagged buy-and-hold on this held-out period; this test does not support selling it as a profitable strategy.</div>'}
   }else s+='<div class="sub">Held-out risk test results appear once the risk model has trained.</div>';
   const lm=lr.month_graded? lr.month_right+' of '+lr.month_graded+' risk classifications correct (no-alert baseline: '+lr.month_always_buy_right+')':'none graded yet';
   s+='<div class="sub" style="margin-top:8px">Live risk-classifier record: '+(lr.calls||0)+' logged calls · 21-session outcomes: '+lm+'.';
@@ -637,6 +642,6 @@ load();
  }$mi('miResearch').onclick=research;$mi('miTrain').onclick=train;$mi('miSaveThesis').onclick=saveThesis;$mi('miSavePortfolio').onclick=savePortfolio;$mi('miAnalyzePortfolio').onclick=analyzePortfolio;$mi('miGovernance').onclick=governance;$mi('miRefresh').onclick=()=>{research();loadTheses();analyzePortfolio();governance()};loadTheses();governance();
 })();
 </script>
-<script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(d.enabled?'COLLECTING / MONITORING':'OFFLINE');$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script>
+<script>(function(){const $=id=>document.getElementById(id);async function refreshMiraLearning(){try{const r=await fetch('/api/learning',{cache:'no-store'});if(!r.ok)throw Error('Learning status unavailable');const d=await r.json();$('mlState').textContent=d.training_running?'MODEL TRAINING':(Number(d.predictions_graded||0)>0?'OUTCOMES GRADED · MONITORING':(d.enabled?'NO GRADED OUTCOMES':'OFFLINE'));$('mlEvents').textContent=Number(d.events_total||0).toLocaleString();$('mlGraded').textContent=Number(d.predictions_graded||0).toLocaleString();$('mlPending').textContent=Number(d.predictions_pending||0).toLocaleString();$('mlTrained').textContent=d.model_trained_through||'Not trained';$('mlSources').replaceChildren();(d.sources||[]).forEach(x=>{const e=document.createElement('span');e.textContent=x.source+': '+x.events+' · '+(x.last_seen||'');$('mlSources').append(e)});$('mlPolicy').textContent=d.learning_policy+' '+d.continuous_compute_note}catch(e){$('mlState').textContent='STATUS UNAVAILABLE';$('mlPolicy').textContent=e.message}}refreshMiraLearning();setInterval(refreshMiraLearning,30000)})();</script>
 </body>
 </html>
