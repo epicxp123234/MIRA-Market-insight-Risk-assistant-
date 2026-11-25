@@ -2814,11 +2814,13 @@ def event_learning_cycle():
     marks=",".join("?" for _ in sources)
     db=intel_db()
     try:
-        candidates=db.execute("""SELECT e.event_id,e.source,e.symbol,e.event_type,e.event_at,e.ingested_at,e.payload_json
-            FROM learning_events e WHERE e.source IN ("""+marks+") AND e.event_type IN ('news_article','sec_filing')
-            AND e.time_precision='instant' AND julianday(e.ingested_at)-julianday(e.event_at) BETWEEN 0 AND 1
-            AND NOT EXISTS (SELECT 1 FROM event_outcomes o WHERE o.event_id=e.event_id AND o.horizon_sessions=5)
-            ORDER BY e.ingested_at ASC LIMIT 500",sources).fetchall()
+        query=("SELECT e.event_id,e.source,e.symbol,e.event_type,e.event_at,e.ingested_at,e.payload_json "
+            "FROM learning_events e WHERE e.source IN ({}) "
+            "AND e.event_type IN ('news_article','sec_filing') "
+            "AND e.time_precision='instant' AND julianday(e.ingested_at)-julianday(e.event_at) BETWEEN 0 AND 1 "
+            "AND NOT EXISTS (SELECT 1 FROM event_outcomes o WHERE o.event_id=e.event_id AND o.horizon_sessions=5) "
+            "ORDER BY e.ingested_at ASC LIMIT 500").format(marks)
+        candidates=db.execute(query,sources).fetchall()
     finally:db.close()
     by_symbol={}
     for row in candidates:by_symbol.setdefault(row["symbol"],[]).append(row)
