@@ -2269,6 +2269,10 @@ def chart_payload(days=180):
 ASSET_UNIVERSE_CACHE={"at":0.0,"equities":[],"error":None}
 ASSET_CHART_CACHE={}
 ASSET_INDEX_SERIES={"NASDAQ100":"NASDAQ100","SP500":"SP500","DJIA":"DJIA"}
+# Background persistence of provider-derived calculations is disabled until the relevant
+# provider has explicitly cleared scheduled use, derived analytics, and storage.
+SCHEDULED_ALPACA_CALCS_OK=os.environ.get("MIRA_SCHEDULED_ALPACA_CALCS_OK","").strip()=="1"
+SCHEDULED_FRED_CALCS_OK=os.environ.get("MIRA_SCHEDULED_FRED_CALCS_OK","").strip()=="1"
 
 def asset_universe_payload():
     now=time.time()
@@ -2731,6 +2735,32 @@ def research_bundle(symbol):
     return result
 
 
+def _scheduled_market_calculation(symbol):
+    """Optional six-hour, daily-bar summary; opt in only after provider rights are cleared."""
+    symbol=str(symbol or "").upper().strip()
+    asset_type="index" if symbol in ASSET_INDEX_SERIES else "equity"
+    provider="FRED" if asset_type=="index" else "Alpaca IEX"
+    allowed=SCHEDULED_FRED_CALCS_OK if asset_type=="index" else SCHEDULED_ALPACA_CALCS_OK
+    checked=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not allowed:
+        return {"available":False,"symbol":symbol,"provider":provider,"checked_at":checked,
+            "reason":"Scheduled calculations are disabled until this provider clears commercial use, derived analytics, and storage."}
+    try:
+        chart=asset_chart_payload(symbol,asset_type,365)
+        closes=chart.get("closes") or []
+        if not closes: raise ValueError("No daily closing prices were returned.")
+        def period_return(sessions):
+            if len(closes)<=sessions or float(closes[-sessions-1])==0: return None
+            return round((float(closes[-1])/float(closes[-sessions-1])-1)*100,2)
+        return {"available":True,"symbol":symbol,"provider":provider,"checked_at":checked,
+            "data_as_of":chart.get("as_of"),"latest_daily_close":round(float(closes[-1]),4),
+            "return_20_sessions_pct":period_return(20),"return_60_sessions_pct":period_return(60),
+            "interpretation":"Historical price changes through the latest available daily bar; descriptive only, not a next-session forecast."}
+    except Exception as exc:
+        return {"available":False,"symbol":symbol,"provider":provider,"checked_at":checked,
+            "reason":"Scheduled calculation unavailable: "+str(exc)[:180]}
+
+
 def _returns_from_prices(prices):
     return [math.log(prices[i]/prices[i-1]) for i in range(1,len(prices)) if prices[i]>0 and prices[i-1]>0]
 
@@ -2837,6 +2867,10 @@ def thesis_monitor_loop():
                     if age<21600: continue
                 prior=json.loads(prior_row[0]) if prior_row else {}
                 payload=research_bundle(row["symbol"]); fetched=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                market_calculation=_scheduled_market_calculation(row["symbol"])
+                payload["market_calculation"]=market_calculation
+                if market_calculation.get("available"):
+                    record_learning_event("market_monitor","scheduled_daily_calculation",row["symbol"],market_calculation,observed_at=fetched)
                 prior_urls={x.get("url") for x in ((prior.get("filings") or {}).get("items",[])+(prior.get("news") or {}).get("items",[])) if x.get("url")}
                 current=(payload.get("filings") or {}).get("items",[])+(payload.get("news") or {}).get("items",[])
                 payload["monitor_changes"]={"previous_scan":previous,"new_items":[x for x in current if x.get("url") and x.get("url") not in prior_urls],"checked_at":fetched}

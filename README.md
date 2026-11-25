@@ -41,3 +41,11 @@ Bundled data covers Nasdaq-100 daily closes from 1986, Nasdaq Composite daily cl
 ## Future company-integrity module
 
 The page shows a planned module for reviewing owner-authorized sample logs, schemas, and test fixtures. It is inactive and does not scan production systems. A real deployment would need scoped data access, privacy controls, and evaluation against labeled incidents and false-positive costs.
+
+## Commercial readiness
+
+MIRA is currently a research prototype, not a validated trading edge or institutional production service. The owner reports that they described the intended use when requesting a FRED API key and were issued a key; the scope of any separate permission still needs to be checked against the written response and the underlying series rights. Alpaca's feed also has commercial display/redistribution restrictions. See [COMMERCIAL_READINESS.md](COMMERCIAL_READINESS.md) for the measured model results, provider terms, and release gates.
+
+## $50/month workflow preview
+
+The month-to-month personal research workflow is described in [pilot.html](pilot.html), with the internal offer and monthly handoff outline in [MONTHLY_OFFER.md](MONTHLY_OFFER.md) and a source-linked example at [sample-brief.html](sample-brief.html). It costs $50/month and currently relies on a human-reviewed monthly handoff; the page does not process or automatically renew payments. The workflow is for research organization, not a validated prediction or investment-advice service. News and market data are included only if their terms allow the intended use.

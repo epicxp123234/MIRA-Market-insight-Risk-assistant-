@@ -1,5 +1,9 @@
 # Historical data sources and coverage
 
+## Commercial-use and machine-learning restrictions
+
+The owner reports that they described the intended use when requesting a FRED API key and were issued a key. This repository does not include that correspondence, so its exact scope is unverified. Under the published standard terms, an API key is access to the API and does not by itself override the restrictions on software/ML training, caching, or third-party copyrighted series. The NASDAQ100 series identifies Nasdaq, Inc. as its source and is copyrighted. Keep the written FRED response and confirm it expressly covers model training, storage/caching, commercial display, and the specific Nasdaq series before relying on it for those activities. Alpaca access also does not automatically grant a right to resell or redistribute its feed. See [COMMERCIAL_READINESS.md](../COMMERCIAL_READINESS.md) and its linked provider terms.
+
 The project bundles four source files under this folder. The download date was 2026-10-24.
 
 - `nasdaq100_daily.csv`: daily Nasdaq-100 closes from 1986-01-02 through the latest date in the file, from the FRED series NASDAQ100. FRED identifies Nasdaq, Inc. as the source and notes the series is copyrighted. [FRED NASDAQ100](https://fred.stlouisfed.org/series/NASDAQ100)

@@ -164,6 +164,7 @@ hr{border-color:#343434!important}
     <span class="chip" id="chipServer">Connecting…</span>
     <span class="chip" id="chipData">Data —</span>
     <span class="chip" id="chipLive">Live price —</span>
+    <a class="chip" href="/pilot.html" style="text-decoration:none">$50 / month</a>
   </div>
 </header>
 <main>
@@ -207,6 +208,7 @@ hr{border-color:#343434!important}
   </section>
 
   <p class="note" id="assetDisclaimer"><b>How to read this.</b> Market prices and research-model outputs are kept instrument-specific. MIRA's current neural risk model is trained on Nasdaq-100 daily history only; it is not reused for other stocks or ETFs. Other instruments receive price and statistical diagnostics until a symbol-specific model has completed chronological training, calibration and untouched holdout evaluation. Research output, not financial advice.</p>
+  <p class="note">This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis. See the <a href="https://fred.stlouisfed.org/legal/" target="_blank" rel="noreferrer">FRED terms</a> and <a href="data/SOURCES.md">data provenance and limitations</a>.</p>
 
 <section class="mira-intel" id="mira-intelligence">
  <div class="mira-intel-head"><div><div class="mira-kicker">MIRA RESEARCH WORKSPACE</div><h2>Evidence · Portfolio · Thesis · Governance</h2><p>Source-linked research and auditable quantitative workflows. Missing provider data is shown as unavailable, never inferred.</p></div><button type="button" id="miRefresh">Refresh workspace</button></div>
@@ -331,11 +333,15 @@ function renderSelectedAssetCards(){
   $('verdictCard').innerHTML=h;
 
   const arRange=ar.next_session_price_range_95||[];
-  let s='<h2>Calculated reasoning · '+esc(symbol)+'</h2>';
-  s+='<div class="sub"><b>Price history:</b> 20-session return '+pp(change(20))+'; 60-session return '+pp(change(60))+'.</div>';
+  let s='<h2>Quick read · '+esc(symbol)+'</h2>';
+  s+='<div class="sub"><b>Recent movement:</b> The price changed '+pp(change(20))+' over 20 sessions and '+pp(change(60))+' over 60 sessions. The recent price pattern looks '+esc(trend.classification||'unclear')+'. This describes past prices; it does not say what the next session will do.</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Next-session direction:</b> No validated up/down forecast is available for this ticker. '+(ar.available?'A separate price-only calculation estimates '+pp(ar.next_session_positive_probability)+' for an up close, but it is uncalibrated and has not been shown to predict future direction reliably.':'No price-only estimate is available: '+esc(ar.reason||'there is not enough history.'))+'</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Data date:</b> daily price history through '+esc(d.as_of||'unavailable')+'. If the market is closed, calculations use the latest completed daily bar. News and filings are displayed as evidence; they are not training inputs for this forecast.</div>';
+  s+='<details style="margin-top:10px"><summary>How the calculations work</summary>';
+  s+='<div class="sub" style="margin-top:7px"><b>Price history:</b> 20-session return '+pp(change(20))+'; 60-session return '+pp(change(60))+'.</div>';
   s+='<div class="sub" style="margin-top:7px"><b>Trend evidence:</b> '+esc(trend.classification||'insufficient history')+' ('+esc(trend.bullish_components??'—')+'/'+esc(trend.components??'—')+' components agree; component score '+pp(trend.score_pct==null?null:trend.score_pct/100)+', not a probability). 20-session regression '+esc(r20.direction||'unavailable')+' with R² '+num(r20.r_squared)+'.</div>';
-  s+='<div class="sub" style="margin-top:7px"><b>Next-session calculation:</b> '+(ar.available?'ARIMA(1,1,0) fits recent log returns; its Gaussian estimate is '+pp(ar.next_session_positive_probability)+' up, with a 95% price range '+(arRange.length===2?num(arRange[0])+'–'+num(arRange[1]):'unavailable')+'. This estimate is not calibrated and is not a validated trade call.':esc(ar.reason||'Insufficient price history for ARIMA.'))+'</div>';
-  s+='<div class="sub" style="margin-top:7px"><b>Training inputs:</b> '+(model.features&&model.features.length?'Current promoted model uses '+esc(model.features.join(', '))+'.':'No promoted symbol-specific model. News and SEC records are retained in the Supabase-backed event store, but the current symbol model is trained on price features only.')+'</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Experimental calculation:</b> '+(ar.available?'ARIMA(1,1,0) fits recent log returns; its Gaussian estimate is '+pp(ar.next_session_positive_probability)+' up, with a 95% price range '+(arRange.length===2?num(arRange[0])+'–'+num(arRange[1]):'unavailable')+'. This is not calibrated and is not a validated trade call.':esc(ar.reason||'Insufficient price history for ARIMA.'))+'</div>';
+  s+='<div class="sub" style="margin-top:7px"><b>Training inputs:</b> '+(model.features&&model.features.length?'Current promoted model uses '+esc(model.features.join(', '))+'.':'No promoted symbol-specific model. News and SEC records are retained in the Supabase-backed event store, but the current symbol model is trained on price features only.')+'</div></details>';
   $('scoreCard').innerHTML=s;
 
   const hasC=d.candles&&d.candles.length>0,mode=$('chartMode').value;
