@@ -5,7 +5,7 @@
 
 ## Decision
 
-MIRA is not ready to be sold as a high-accuracy forecasting or trading product. The current evidence does not show a profitable or reliable directional edge, the 77.6% figure is not next-session direction accuracy, news and SEC records are not model inputs, and the bundled market data has unresolved commercial-use restrictions. Do not advertise an 88% result, fund-grade forecasts, or expected profits.
+MIRA is not ready to be sold as a high-accuracy forecasting or trading product. The current evidence does not show a profitable or reliable directional edge, the 77.6% figure is not next-session direction accuracy, news and SEC records do not influence a validated production forecast, and the bundled market data has unresolved commercial-use restrictions. Do not advertise an 88% result, fund-grade forecasts, or expected profits.
 
 There is a credible product direction: an auditable equity research workbench that joins price context, filings/news, thesis tracking, risk scenarios, and a forecast scorecard. Its near-term value should come from faster, traceable analyst work. A predictive edge can become a claim only after a licensed point-in-time data pipeline and independent walk-forward evidence establish it.
 
@@ -35,7 +35,7 @@ These tasks have different labels and horizons. They must not be blended into on
 ## What the running server has and has not learned
 
 - Supabase is used as durable storage for the intelligence SQLite database and selected model/data files when the deployment has its Supabase URL and service key configured. Storage is persistence, not model training.
-- The ingestion code stores Finnhub news, SEC filings, fundamentals, market observations, and forecast-ledger rows as evidence events. The current Nasdaq and symbol-specific model features are price-derived; the code describes news/filings as evidence memory until a point-in-time labeled corpus exists.
+- The ingestion code stores Finnhub news, SEC filings, fundamentals, market observations, and forecast-ledger rows as evidence events. The existing Nasdaq and symbol-specific production-model features remain price-derived. A separate prospective event-learning challenger now captures source time and first-seen time, attaches accession-matched SEC XBRL metrics where available, grades five-session post-capture-close outcomes, and compares a simple event-plus-price model with price-only and majority baselines across three purged expanding walk-forward windows. It is disabled by default pending provider-use clearance and remains shadow-only; no historical news corpus or validated event edge is claimed.
 - The supplied production screenshot shows 357 evidence events, zero graded forecasts, and one pending forecast. Those observations do not yet form a supervised training set. “The server has been running” is not equivalent to learning from outcomes.
 - The general Nasdaq trainer is trained on Nasdaq-100 price history. Typed symbols can receive a chart and descriptive calculations, but the symbol-specific trainer is a 21-session downside-risk model; it is not a validated next-session direction model for every symbol.
 - The local app is a single-process Python/HTML research prototype. The README already notes that the free Render process may sleep or restart, so it does not provide a 24/7 service guarantee.
@@ -58,7 +58,7 @@ FRED's published API terms also say an app offered to other users must link to i
 ## Release gates that would make the product credible
 
 1. **Clear the data rights.** Replace restricted sources with a paid/licensed feed or written permissions covering model training, customer display, derived outputs, and storage. Record rights and expiry per dataset. For an authorized FRED API application, add the terms agreement and privacy policy required by its published API terms.
-2. **Build point-in-time features.** Keep publication time, ingestion time, source, filing period, correction/revision history, symbol mapping, and feature version. Do not feed a model a filing before it was public. Start with an auditable news/filing event study; add those features to forecasting only if they beat a price-only benchmark on unseen dates.
+2. **Grow and audit the point-in-time event sample.** The initial prospective path stores publication/acceptance time separately from first capture and uses simple keyword/form features. It does not parse full filing text or recover old point-in-time history. Confirm source licensing, accumulate enough events, then test across multiple walk-forward periods, assets, and market regimes before considering any production use.
 3. **Evaluate one task at a time.** Use purged, expanding walk-forward windows across multiple market regimes and a fixed universe. Compare against majority/prevalence, simple momentum/trend, and buy-and-hold baselines. Report accuracy and balanced accuracy together with AUC, Brier/log loss, calibration, precision/recall, coverage, and uncertainty intervals.
 4. **Test decisions after costs.** Include spread, commissions, slippage, borrow/financing where relevant, dividends, splits, and realistic execution timing. Publish net results alongside benchmark results; do not select a signal by repeatedly tuning against the final holdout.
 5. **Set an evidence-based promotion gate.** A challenger should beat its benchmark on untouched chronological windows, improve probability quality, and show stable net results across assets/regimes. If it fails, show “no validated edge” and keep descriptive chart calculations clearly labeled as diagnostics.
@@ -74,6 +74,7 @@ I reviewed public vendor descriptions from [Koyfin](https://www.koyfin.com/prici
 ## Work completed in this review
 
 - Mapped the local forecast targets, chronological splits, model inputs, evidence ledger, Supabase snapshot code, and model-promotion flow.
+- Added a separate, default-off news/SEC shadow challenger with first-capture timestamps, accession-matched SEC XBRL features, delayed five-session outcome labels, source-specific training gates, a price-only comparator, and chronological holdout reporting. It does not alter the production forecast.
 - Compared the production screenshot with the checked-in holdout report and kept their metrics explicitly separate.
 - Checked current primary-source data-use and performance-marketing pages.
 - Recorded the owner's statement about explaining the FRED use when requesting the key, marked the approval scope as unverified in the repository, and added the published FRED non-endorsement notice to both app views.

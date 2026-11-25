@@ -2273,6 +2273,11 @@ ASSET_INDEX_SERIES={"NASDAQ100":"NASDAQ100","SP500":"SP500","DJIA":"DJIA"}
 # provider has explicitly cleared scheduled use, derived analytics, and storage.
 SCHEDULED_ALPACA_CALCS_OK=os.environ.get("MIRA_SCHEDULED_ALPACA_CALCS_OK","").strip()=="1"
 SCHEDULED_FRED_CALCS_OK=os.environ.get("MIRA_SCHEDULED_FRED_CALCS_OK","").strip()=="1"
+# News-event modeling is a separate, shadow-only research path. Keep it disabled until
+# the provider's terms cover model training and derived data storage.
+EVENT_LABELS_ALPACA_OK=os.environ.get("MIRA_EVENT_LABELS_ALPACA_OK","").strip()=="1"
+EVENT_MODEL_FINNHUB_OK=os.environ.get("MIRA_FINNHUB_NEWS_MODEL_OK","").strip()=="1"
+EVENT_MODEL_SEC_OK=os.environ.get("MIRA_SEC_EVENT_MODEL_OK","").strip()=="1"
 
 def asset_universe_payload():
     now=time.time()
@@ -2553,29 +2558,63 @@ def intel_db():
     CREATE INDEX IF NOT EXISTS prediction_due ON prediction_ledger(symbol,as_of,horizon,outcome);
     CREATE TABLE IF NOT EXISTS learning_events (
       event_id TEXT PRIMARY KEY, source TEXT NOT NULL, symbol TEXT NOT NULL DEFAULT '',
-      event_type TEXT NOT NULL, observed_at TEXT NOT NULL, payload_json TEXT NOT NULL
+      event_type TEXT NOT NULL, observed_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+      event_at TEXT, ingested_at TEXT, time_precision TEXT
     );
     CREATE INDEX IF NOT EXISTS learning_events_recent ON learning_events(observed_at DESC);
     CREATE INDEX IF NOT EXISTS learning_events_source ON learning_events(source,observed_at DESC);
+    CREATE TABLE IF NOT EXISTS event_outcomes (
+      event_id TEXT NOT NULL, symbol TEXT NOT NULL, horizon_sessions INTEGER NOT NULL,
+      captured_at TEXT NOT NULL, base_date TEXT NOT NULL, outcome_date TEXT NOT NULL,
+      return_pct REAL NOT NULL, direction INTEGER NOT NULL, source TEXT NOT NULL,
+      event_type TEXT NOT NULL, features_json TEXT NOT NULL,
+      PRIMARY KEY(event_id,horizon_sessions)
+    );
+    CREATE INDEX IF NOT EXISTS event_outcomes_timeline ON event_outcomes(captured_at,outcome_date);
+    CREATE TABLE IF NOT EXISTS event_model_runs (
+      run_id TEXT PRIMARY KEY, status TEXT NOT NULL, details_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS event_model_runs_recent ON event_model_runs(created_at DESC);
     """)
+    # Migrate old evidence rows without inventing a historical ingestion time. The
+    # first observation after this release is recorded separately from source time.
+    event_columns={r[1] for r in db.execute("PRAGMA table_info(learning_events)").fetchall()}
+    migrated=False
+    for name in ("event_at","ingested_at","time_precision"):
+        if name not in event_columns:
+            db.execute("ALTER TABLE learning_events ADD COLUMN "+name+" TEXT");migrated=True
+    db.execute("CREATE INDEX IF NOT EXISTS learning_events_ingested ON learning_events(ingested_at DESC)")
+    if migrated:db.commit()
     return db
 
 
 def record_learning_events(events):
-    """Persist a batch of source-attributed observations with one SQLite/Supabase commit."""
+    """Persist source time and first-seen time separately; legacy observed_at stays compatible."""
     try:
         rows=[]; digests=[]
-        for source,event_type,symbol,payload,observed_at in events:
-            stamp=observed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for item in events:
+            source,event_type,symbol,payload,observed_at=item[:5]
+            event_at=(item[5] if len(item)>5 else observed_at)
+            precision=(item[6] if len(item)>6 else None)
+            ingested=datetime.now(timezone.utc).isoformat(timespec="seconds")
+            stamp=observed_at or event_at or ingested
+            if not precision:
+                precision="instant" if event_at and "T" in str(event_at) else ("date" if event_at else "unknown")
             body=json.dumps(payload or {},sort_keys=True,separators=(",",":"),ensure_ascii=False,default=str)
             if len(body)>60000: body=body[:60000]
             digest=hashlib.sha256((str(source)+"|"+str(event_type)+"|"+str(symbol)+"|"+body).encode("utf-8")).hexdigest()
-            rows.append((digest,str(source)[:40],str(symbol or "")[:20],str(event_type)[:60],stamp,body));digests.append(digest)
+            rows.append((digest,str(source)[:40],str(symbol or "")[:20],str(event_type)[:60],stamp,body,event_at,ingested,precision));digests.append(digest)
         if not rows:return []
         db=intel_db()
         try:
-            db.executemany("INSERT OR IGNORE INTO learning_events(event_id,source,symbol,event_type,observed_at,payload_json) VALUES(?,?,?,?,?,?)",rows)
+            db.executemany("""INSERT INTO learning_events(event_id,source,symbol,event_type,observed_at,payload_json,event_at,ingested_at,time_precision)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET
+                event_at=COALESCE(learning_events.event_at,excluded.event_at),
+                ingested_at=COALESCE(learning_events.ingested_at,excluded.ingested_at),
+                time_precision=COALESCE(learning_events.time_precision,excluded.time_precision)""",rows)
             db.execute("DELETE FROM learning_events WHERE event_id IN (SELECT event_id FROM learning_events ORDER BY observed_at DESC LIMIT -1 OFFSET 12000)")
+            db.execute("DELETE FROM event_outcomes WHERE event_id NOT IN (SELECT event_id FROM learning_events)")
             db.commit()
         finally: db.close()
         return digests
@@ -2592,18 +2631,268 @@ def record_learning_event(source, event_type, symbol="", payload=None, observed_
 
 
 LEARNING_RUNTIME={"last_supervisor_cycle":None,"cycles":0,"last_error":None}
+EVENT_LEARNING_RUNTIME={"last_run":None,"last_error":None,"message":"Waiting for provider-use flags.","symbols_checked":0,"labels_added":0}
+EVENT_LEARNING_LAST_MONO=0.0
+
+EVENT_FEATURE_NAMES=("price_ret_1","price_ret_5","price_ret_20","price_vol_20","text_sentiment","text_uncertainty","text_length","is_news","is_sec","form_8k","form_10q","form_10k","form_other","sec_facts_available","sec_revenue_yoy","sec_net_income_margin","sec_liabilities_assets","sec_cashflow_margin")
+_EVENT_POSITIVE_WORDS={"beat","beats","beating","growth","grew","strong","raises","raised","upgrade","profit","profitable","record","surge","surged","approval","approved","launch","launched","win","wins"}
+_EVENT_NEGATIVE_WORDS={"miss","misses","missed","decline","declined","weak","cuts","cut","downgrade","loss","losses","lawsuit","investigation","warning","warns","recall","recalled","fraud","default","bankruptcy","layoff","layoffs"}
+_EVENT_UNCERTAINTY_WORDS={"may","might","could","uncertain","uncertainty","risk","risks","expects","expect","forecast","guidance","pending","investigation","alleged","subject"}
+
+def _enabled_event_sources():
+    sources=[]
+    if EVENT_MODEL_FINNHUB_OK:sources.append("finnhub_news")
+    if EVENT_MODEL_SEC_OK:sources.append("sec_edgar")
+    return sources
+
+def _event_parse_time(value):
+    if not value:return None
+    try:
+        parsed=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+        if parsed.tzinfo is None:parsed=parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError,ValueError):return None
+
+def _event_feature_vector(source,event_type,payload,dates,closes,captured_at):
+    captured=_event_parse_time(captured_at)
+    if captured is None:return None
+    # Exclude same-calendar-date bars: Alpaca daily bars have no intraday timestamp,
+    # so using one could accidentally include a close that happened after capture.
+    prior=[float(c) for d,c in zip(dates,closes) if str(d)<captured.date().isoformat() and float(c)>0]
+    if len(prior)<21:return None
+    def ret(n):return prior[-1]/prior[-1-n]-1.0
+    log_returns=[math.log(prior[i]/prior[i-1]) for i in range(len(prior)-20,len(prior)) if prior[i]>0 and prior[i-1]>0]
+    vol=statistics.pstdev(log_returns) if len(log_returns)>1 else 0.0
+    text=" ".join(str(payload.get(k) or "") for k in ("headline","summary","description","form")).lower()
+    words=re.findall(r"[a-z]+",text)
+    denominator=math.sqrt(max(1,len(words)))
+    pos=sum(w in _EVENT_POSITIVE_WORDS for w in words); neg=sum(w in _EVENT_NEGATIVE_WORDS for w in words)
+    uncertainty=sum(w in _EVENT_UNCERTAINTY_WORDS for w in words)
+    form=str(payload.get("form") or "").upper()
+    ff=payload.get("filing_facts") if isinstance(payload.get("filing_facts"),dict) else {}
+    def fact_value(name):
+        fact=ff.get(name) if isinstance(ff.get(name),dict) else {}
+        try:
+            value=float(fact.get("value"))
+            return value if math.isfinite(value) else None
+        except (TypeError,ValueError):return None
+    revenue=fact_value("revenue");net_income=fact_value("net_income");assets=fact_value("assets");liabilities=fact_value("liabilities");cashflow=fact_value("operating_cash_flow")
+    def ratio(numerator,denominator,limit=5.0):
+        if numerator is None or denominator is None or abs(denominator)<1e-9:return 0.0
+        return max(-limit,min(limit,numerator/denominator))
+    revenue_fact=ff.get("revenue") if isinstance(ff.get("revenue"),dict) else {}
+    try:revenue_yoy=float(revenue_fact.get("yoy"))
+    except (TypeError,ValueError):revenue_yoy=0.0
+    if not math.isfinite(revenue_yoy):revenue_yoy=0.0
+    features=[ret(1),ret(5),ret(20),vol,(pos-neg)/denominator,uncertainty/denominator,min(len(words),400)/400.0,
+        1.0 if source=="finnhub_news" or event_type=="news_article" else 0.0,
+        1.0 if source=="sec_edgar" or event_type=="sec_filing" else 0.0,
+        1.0 if form=="8-K" else 0.0,1.0 if form=="10-Q" else 0.0,1.0 if form=="10-K" else 0.0,
+        1.0 if form and form not in ("8-K","10-Q","10-K") else 0.0,
+        1.0 if any(v is not None for v in (revenue,net_income,assets,liabilities,cashflow)) else 0.0,
+        max(-3.0,min(5.0,revenue_yoy)),ratio(net_income,revenue,2.0),ratio(liabilities,assets,5.0),ratio(cashflow,revenue,2.0)]
+    return [float(x) if math.isfinite(float(x)) else 0.0 for x in features]
+
+def _fetch_event_label_bars(symbol):
+    if not (MARKET_API_KEY and MARKET_API_SECRET):raise RuntimeError("Alpaca credentials are not configured.")
+    start=(datetime.now(timezone.utc)-timedelta(days=1900)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url="https://data.alpaca.markets/v2/stocks/"+symbol+"/bars?timeframe=1Day&adjustment=all&feed=iex&sort=asc&limit=1000&start="+start
+    req=Request(url,headers={"APCA-API-KEY-ID":MARKET_API_KEY,"APCA-API-SECRET-KEY":MARKET_API_SECRET,"Accept":"application/json"})
+    with urlopen(req,timeout=20) as response:raw=json.loads(response.read())
+    rows=[]
+    local_now=eastern_now()
+    last_completed_day=local_now.date().isoformat() if (local_now.weekday()>=5 or local_now.time()>=dt_time(16,15)) else (local_now.date()-timedelta(days=1)).isoformat()
+    for bar in raw.get("bars") or []:
+        try:
+            close=float(bar["c"]); day=str(bar["t"])[:10]
+            if close>0 and day<=last_completed_day and re.fullmatch(r"\d{4}-\d{2}-\d{2}",day):rows.append((day,close))
+        except (KeyError,TypeError,ValueError):continue
+    rows=sorted({d:c for d,c in rows}.items())
+    if len(rows)<30:raise RuntimeError("Provider returned too few daily closes for the event label window.")
+    return [d for d,c in rows],[c for d,c in rows]
+
+def _event_logistic_fit(rows,feature_indices):
+    if not rows:return None
+    matrix=[[float(json.loads(r["features_json"])[i]) for i in feature_indices] for r in rows]
+    labels=[int(r["direction"]) for r in rows]
+    means=[sum(row[j] for row in matrix)/len(matrix) for j in range(len(feature_indices))]
+    scales=[]
+    for j,mean in enumerate(means):
+        sd=math.sqrt(sum((row[j]-mean)**2 for row in matrix)/max(1,len(matrix)-1))
+        scales.append(sd if sd>1e-9 else 1.0)
+    x=[[1.0]+[(row[j]-means[j])/scales[j] for j in range(len(feature_indices))] for row in matrix]
+    rate=sum(labels)/len(labels)
+    weights=[math.log(max(.01,min(.99,rate))/(1-max(.01,min(.99,rate))))]+[0.0]*len(feature_indices)
+    for _ in range(250):
+        grad=[0.0]*len(weights)
+        for row,label in zip(x,labels):
+            z=max(-30.0,min(30.0,sum(a*b for a,b in zip(weights,row))))
+            p=1/(1+math.exp(-z)); error=p-label
+            for j,val in enumerate(row):grad[j]+=error*val/len(x)
+        for j in range(1,len(weights)):grad[j]+=.02*weights[j]
+        for j in range(len(weights)):weights[j]-=.08*grad[j]
+    return {"weights":weights,"means":means,"scales":scales,"feature_indices":list(feature_indices)}
+
+def _event_logistic_predict(model,features):
+    values=[1.0]+[(float(features[i])-m)/s for i,m,s in zip(model["feature_indices"],model["means"],model["scales"])]
+    z=max(-30.0,min(30.0,sum(a*b for a,b in zip(model["weights"],values))))
+    return 1/(1+math.exp(-z))
+
+def _event_metrics(labels,probabilities):
+    if not labels:return {"n":0}
+    ranked=sorted(zip(probabilities,labels),key=lambda x:x[0])
+    pos=sum(labels);neg=len(labels)-pos;rank_sum=0.0;i=0
+    while i<len(ranked):
+        j=i+1
+        while j<len(ranked) and ranked[j][0]==ranked[i][0]:j+=1
+        average_rank=((i+1)+j)/2
+        rank_sum+=average_rank*sum(label for _,label in ranked[i:j]);i=j
+    auc=(rank_sum-pos*(pos+1)/2)/(pos*neg) if pos and neg else None
+    predictions=[1 if p>=.5 else 0 for p in probabilities]
+    accuracy=sum(pred==y for pred,y in zip(predictions,labels))/len(labels)
+    true_positive=sum(pred==1 and y==1 for pred,y in zip(predictions,labels))
+    true_negative=sum(pred==0 and y==0 for pred,y in zip(predictions,labels))
+    sensitivity=true_positive/pos if pos else None
+    specificity=true_negative/neg if neg else None
+    balanced_accuracy=(sensitivity+specificity)/2 if sensitivity is not None and specificity is not None else None
+    brier=sum((p-y)**2 for p,y in zip(probabilities,labels))/len(labels)
+    logloss=-sum(y*math.log(max(1e-9,p))+(1-y)*math.log(max(1e-9,1-p)) for p,y in zip(probabilities,labels))/len(labels)
+    return {"n":len(labels),"positive_rate":round(pos/len(labels),4),"accuracy":round(accuracy,4),"balanced_accuracy":round(balanced_accuracy,4) if balanced_accuracy is not None else None,"brier":round(brier,5),"log_loss":round(logloss,5),"auc":round(auc,4) if auc is not None else None}
+
+def _train_event_challenger():
+    sources=_enabled_event_sources()
+    if not sources:return {"status":"off","message":"No provider sources are enabled for event-model training.","live_forecast_use":False,"sources_used":[]}
+    marks=",".join("?" for _ in sources)
+    db=intel_db()
+    try:
+        raw_rows=db.execute("SELECT symbol,captured_at,outcome_date,direction,features_json FROM (SELECT symbol,captured_at,outcome_date,direction,features_json FROM event_outcomes WHERE horizon_sessions=5 AND source IN ("+marks+") ORDER BY captured_at DESC LIMIT 5000) ORDER BY captured_at ASC",sources).fetchall()
+        rows=[];seen_symbol_days=set()
+        for row in raw_rows:
+            key=(row["symbol"],str(row["captured_at"])[:10])
+            if key not in seen_symbol_days:seen_symbol_days.add(key);rows.append(row)
+        if not rows:return {"status":"collecting","labels":0,"message":"No matured five-session event labels yet.","sources_used":sources,"live_forecast_use":False}
+        dates=sorted({str(r["captured_at"])[:10] for r in rows})
+        if len(dates)<40:return {"status":"collecting","labels":len(rows),"sources_used":sources,"live_forecast_use":False,"message":"Collecting more distinct capture dates before walk-forward evaluation."}
+        result={"status":"collecting","labels":len(rows),"horizon_sessions":5,"label_definition":"Direction from the first completed daily close after capture to the fifth subsequent close.","features":list(EVENT_FEATURE_NAMES),"sources_used":sources,"evaluation":"one event per symbol-day; three expanding chronological windows; labels crossing each test boundary are purged","live_forecast_use":False}
+        price_prob=[];event_prob=[];majority_prob=[];labels=[];holdout=[];fold_results=[];latest_train_through=None
+        for start_fraction in (.55,.69,.83):
+            start_index=int(len(dates)*start_fraction);end_index=min(len(dates),int(len(dates)*(start_fraction+.14)))
+            if start_index>=len(dates) or end_index<=start_index:continue
+            fold_start=dates[start_index];fold_end=dates[end_index] if end_index<len(dates) else None
+            train=[r for r in rows if str(r["captured_at"])[:10]<fold_start and str(r["outcome_date"])<fold_start]
+            fold_test=[r for r in rows if str(r["captured_at"])[:10]>=fold_start and (fold_end is None or str(r["captured_at"])[:10]<fold_end)]
+            if len(train)<100 or not fold_test:continue
+            price_model=_event_logistic_fit(train,[0,1,2,3])
+            event_model=_event_logistic_fit(train,list(range(len(EVENT_FEATURE_NAMES))))
+            features=[json.loads(r["features_json"]) for r in fold_test]
+            pp=[_event_logistic_predict(price_model,x) for x in features]
+            ep=[_event_logistic_predict(event_model,x) for x in features]
+            fold_labels=[int(r["direction"]) for r in fold_test]
+            fold_base=sum(int(r["direction"]) for r in train)/len(train)
+            fold_results.append({"test_start":fold_start,"test_end":fold_end,"train_rows":len(train),"test_rows":len(fold_test),"event_plus_price":_event_metrics(fold_labels,ep),"price_only":_event_metrics(fold_labels,pp)})
+            labels.extend(fold_labels);price_prob.extend(pp);event_prob.extend(ep);majority_prob.extend([fold_base]*len(fold_test));holdout.extend(fold_test)
+            latest_train_through=max(str(r["captured_at"])[:10] for r in train)
+        holdout_dates={str(r["captured_at"])[:10] for r in holdout};holdout_symbols={r["symbol"] for r in holdout}
+        result.update({"train_rows":min((x["train_rows"] for x in fold_results),default=0),"holdout_rows":len(holdout),"holdout_dates":len(holdout_dates),"holdout_symbols":len(holdout_symbols),"walk_forward_folds":fold_results})
+        if len(fold_results)<3 or len(holdout)<100 or len(holdout_dates)<30 or len(holdout_symbols)<3:
+            result["message"]="Not enough purged walk-forward data across dates and symbols. The model remains shadow-only.";return result
+        result.update({"status":"shadow_evaluated","message":"Three expanding chronological windows scored. This challenger does not drive MIRA's live call.","train_through":latest_train_through,"walk_forward_window_count":len(fold_results),"price_only_baseline":_event_metrics(labels,price_prob),"news_filings_plus_price":_event_metrics(labels,event_prob),"training_majority_baseline":_event_metrics(labels,majority_prob),"live_forecast_use":False})
+        return result
+    finally:db.close()
+
+def event_learning_cycle():
+    """Capture delayed labels only when both source-training and price-label rights are enabled."""
+    EVENT_LEARNING_RUNTIME["last_run"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not EVENT_LABELS_ALPACA_OK or not (EVENT_MODEL_FINNHUB_OK or EVENT_MODEL_SEC_OK):
+        missing=[]
+        if not EVENT_LABELS_ALPACA_OK:missing.append("MIRA_EVENT_LABELS_ALPACA_OK=1 (only after Alpaca terms allow derived label storage)")
+        if not EVENT_MODEL_FINNHUB_OK:missing.append("MIRA_FINNHUB_NEWS_MODEL_OK=1 (only if the Finnhub plan permits ML training/storage)")
+        if not EVENT_MODEL_SEC_OK:missing.append("MIRA_SEC_EVENT_MODEL_OK=1 (to include SEC filing metadata)")
+        EVENT_LEARNING_RUNTIME.update({"message":"Shadow training is off: "+"; ".join(missing),"symbols_checked":0,"labels_added":0,"last_error":None})
+        return
+    sources=_enabled_event_sources()
+    marks=",".join("?" for _ in sources)
+    db=intel_db()
+    try:
+        candidates=db.execute("""SELECT e.event_id,e.source,e.symbol,e.event_type,e.event_at,e.ingested_at,e.payload_json
+            FROM learning_events e WHERE e.source IN ("""+marks+") AND e.event_type IN ('news_article','sec_filing')
+            AND e.time_precision='instant' AND julianday(e.ingested_at)-julianday(e.event_at) BETWEEN 0 AND 1
+            AND NOT EXISTS (SELECT 1 FROM event_outcomes o WHERE o.event_id=e.event_id AND o.horizon_sessions=5)
+            ORDER BY e.ingested_at ASC LIMIT 500",sources).fetchall()
+    finally:db.close()
+    by_symbol={}
+    for row in candidates:by_symbol.setdefault(row["symbol"],[]).append(row)
+    checked=0;added=0;errors=[]
+    for symbol,events in list(by_symbol.items())[:10]:
+        if not symbol or not re.fullmatch(r"[A-Z0-9.-]{1,12}",symbol):continue
+        try:dates,closes=_fetch_event_label_bars(symbol);checked+=1
+        except Exception as exc:errors.append(symbol+": "+str(exc)[:100]);continue
+        inserts=[]
+        for event in events:
+            captured=_event_parse_time(event["ingested_at"])
+            if captured is None:continue
+            local_capture=eastern_now(captured);capture_day=local_capture.date().isoformat()
+            first_future_day=capture_day if (local_capture.weekday()<5 and local_capture.time()<dt_time(16,0)) else (local_capture.date()+timedelta(days=1)).isoformat()
+            future_starts=[i for i,d in enumerate(dates) if d>=first_future_day]
+            if not future_starts:continue
+            # The event-day close is only a label boundary; features remain strictly
+            # prior to capture. Score the five-session follow-through after that close.
+            base_idx=future_starts[0];future_idx=base_idx+5
+            if future_idx>=len(closes):continue
+            try:payload=json.loads(event["payload_json"])
+            except (TypeError,ValueError):payload={}
+            features=_event_feature_vector(event["source"],event["event_type"],payload,dates,closes,event["ingested_at"])
+            if features is None:continue
+            change=closes[future_idx]/closes[base_idx]-1.0
+            inserts.append((event["event_id"],symbol,5,event["ingested_at"],dates[base_idx],dates[future_idx],change*100.0,1 if change>=0 else 0,event["source"],event["event_type"],json.dumps(features,separators=(",",":"))))
+        if inserts:
+            db=intel_db()
+            try:
+                db.executemany("INSERT OR IGNORE INTO event_outcomes(event_id,symbol,horizon_sessions,captured_at,base_date,outcome_date,return_pct,direction,source,event_type,features_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",inserts)
+                db.commit();added+=db.total_changes
+            finally:db.close()
+    try:
+        details=_train_event_challenger()
+        db=intel_db()
+        try:
+            run_id=hashlib.sha256((datetime.now(timezone.utc).isoformat()+json.dumps(details,sort_keys=True)).encode()).hexdigest()
+            db.execute("INSERT INTO event_model_runs(run_id,status,details_json,created_at) VALUES(?,?,?,?)",(run_id,details.get("status","unknown"),json.dumps(details,ensure_ascii=False,allow_nan=False),datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            db.execute("DELETE FROM event_model_runs WHERE run_id IN (SELECT run_id FROM event_model_runs ORDER BY created_at DESC LIMIT -1 OFFSET 100)")
+            db.commit()
+        finally:db.close()
+        EVENT_LEARNING_RUNTIME.update({"message":details.get("message","Event-model cycle complete."),"symbols_checked":checked,"labels_added":added,"last_error":"; ".join(errors)[:300] or None})
+    except Exception as exc:
+        EVENT_LEARNING_RUNTIME.update({"message":"Shadow training cycle failed safely.","symbols_checked":checked,"labels_added":added,"last_error":str(exc)[:240]})
+
+def _event_learning_status(db):
+    all_sources=["finnhub_news","sec_edgar"]
+    all_marks=",".join("?" for _ in all_sources)
+    captured=db.execute("SELECT COUNT(*) FROM learning_events WHERE source IN ("+all_marks+") AND event_type IN ('news_article','sec_filing') AND time_precision='instant' AND julianday(ingested_at)-julianday(event_at) BETWEEN 0 AND 1",all_sources).fetchone()[0]
+    eligible_sources=_enabled_event_sources()
+    if eligible_sources:
+        marks=",".join("?" for _ in eligible_sources)
+        where="source IN ("+marks+") AND event_type IN ('news_article','sec_filing') AND time_precision='instant' AND julianday(ingested_at)-julianday(event_at) BETWEEN 0 AND 1"
+        total=db.execute("SELECT COUNT(*) FROM event_outcomes WHERE horizon_sessions=5 AND source IN ("+marks+")",eligible_sources).fetchone()[0]
+        pending=db.execute("SELECT COUNT(*) FROM learning_events e WHERE "+where+" AND NOT EXISTS (SELECT 1 FROM event_outcomes o WHERE o.event_id=e.event_id AND o.horizon_sessions=5)",eligible_sources).fetchone()[0]
+    else:total=0;pending=0
+    latest=db.execute("SELECT status,details_json,created_at FROM event_model_runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    model=json.loads(latest["details_json"]) if latest else {"status":"off","message":"No shadow-model run yet.","live_forecast_use":False}
+    if not EVENT_LABELS_ALPACA_OK:model={"status":"off","message":"Outcome labeling is disabled until provider rights are confirmed.","live_forecast_use":False}
+    elif model.get("sources_used")!=eligible_sources:model={"status":"configuration_changed","message":"Waiting for a shadow run with the currently enabled data sources.","live_forecast_use":False}
+    return {"enabled":bool(EVENT_LABELS_ALPACA_OK and eligible_sources),"captured_events":captured,"outcomes_graded":total,"outcomes_pending":pending,"model":model,"last_run":EVENT_LEARNING_RUNTIME.get("last_run"),"runtime":dict(EVENT_LEARNING_RUNTIME)}
 
 def learning_status_payload():
     db=intel_db()
     try:
         total=db.execute("SELECT COUNT(*) FROM learning_events").fetchone()[0]
-        groups=[dict(r) for r in db.execute("SELECT source,COUNT(*) AS events,MAX(observed_at) AS last_seen FROM learning_events GROUP BY source ORDER BY last_seen DESC").fetchall()]
-        recent=[dict(r) for r in db.execute("SELECT source,symbol,event_type,observed_at FROM learning_events ORDER BY observed_at DESC LIMIT 8").fetchall()]
+        groups=[dict(r) for r in db.execute("SELECT source,COUNT(*) AS events,MAX(COALESCE(ingested_at,observed_at)) AS last_seen FROM learning_events GROUP BY source ORDER BY last_seen DESC").fetchall()]
+        recent=[dict(r) for r in db.execute("SELECT source,symbol,event_type,event_at,ingested_at,observed_at FROM learning_events ORDER BY COALESCE(ingested_at,observed_at) DESC LIMIT 8").fetchall()]
         graded=db.execute("SELECT COUNT(*) FROM prediction_ledger WHERE outcome IS NOT NULL").fetchone()[0]
         pending=db.execute("SELECT COUNT(*) FROM prediction_ledger WHERE outcome IS NULL").fetchone()[0]
+        event_learning=_event_learning_status(db)
     finally: db.close()
     brain=brain_load() or {}
-    return {"enabled":True,"event_memory":"supabase-backed SQLite snapshot" if _SUPABASE_SYNC_STATUS.get("configured") else "local SQLite (cloud filesystem may be ephemeral)","events_total":total,"sources":groups,"recent":recent,"predictions_graded":graded,"predictions_pending":pending,"model_trained_through":brain.get("trained_through"),"model_features":brain.get("features",[]),"training_running":bool(BRAIN_JOB.get("running")),"training_message":BRAIN_JOB.get("message"),"supervisor":dict(LEARNING_RUNTIME),"learning_policy":"New observations are retained and transformed into features; supervised model updates wait for matured labels and pass chronological validation. News/filings are evidence memory until a point-in-time labelled historical corpus is available.","continuous_compute_note":"Runs while the Render process is awake. Render Free may sleep/restart; this endpoint cannot guarantee 24/7 execution."}
+    return {"enabled":True,"event_memory":"supabase-backed SQLite snapshot" if _SUPABASE_SYNC_STATUS.get("configured") else "local SQLite (cloud filesystem may be ephemeral)","events_total":total,"sources":groups,"recent":recent,"predictions_graded":graded,"predictions_pending":pending,"model_trained_through":brain.get("trained_through"),"model_features":brain.get("features",[]),"training_running":bool(BRAIN_JOB.get("running")),"training_message":BRAIN_JOB.get("message"),"supervisor":dict(LEARNING_RUNTIME),"event_learning":event_learning,"learning_policy":"News and filing outcomes are captured separately from publication time. A 5-session shadow challenger uses only freshly observed, time-stamped events, future daily closes, and a chronological holdout against a price-only baseline. It stays disabled until provider terms allow training and derived label storage; it never changes the live call.","continuous_compute_note":"Runs while the Render process is awake. Render Free may sleep/restart; this endpoint cannot guarantee 24/7 execution."}
 
 
 def _workspace(handler):
@@ -2670,6 +2959,42 @@ def _sec_company_research(symbol):
                 x=valid[-1]
                 return {"value":x.get("val"),"unit":(next(iter(units),None)),"period_end":x.get("end"),"filed":x.get("filed"),"form":x.get("form"),"tag":tag}
         return None
+    def fact_as_reported(candidates,accession_id,form):
+        wanted=str(accession_id).replace("-","")
+        target_days=90 if form=="10-Q" else 365
+        for tag in candidates:
+            node=us.get(tag)
+            if not node:continue
+            records=[]
+            for unit,arr in node.get("units",{}).items():
+                for row in arr:
+                    if str(row.get("accn","")).replace("-","")!=wanted or row.get("form")!=form or not row.get("end"):continue
+                    try:value=float(row.get("val"))
+                    except (TypeError,ValueError):continue
+                    if math.isfinite(value):records.append({"value":value,"unit":unit,"start":row.get("start"),"end":row.get("end"),"tag":tag})
+            if not records:continue
+            instant=[x for x in records if not x["start"]]
+            if instant:
+                instant.sort(key=lambda x:x["end"])
+                return instant[-1]
+            durations=[]
+            for x in records:
+                try:days=(date.fromisoformat(x["end"])-date.fromisoformat(x["start"])).days
+                except (TypeError,ValueError):continue
+                if days>0:x["period_days"]=days;durations.append(x)
+            if not durations:continue
+            near=[x for x in durations if abs(x["period_days"]-target_days)<=45]
+            pool=near or durations
+            pool.sort(key=lambda x:(x["end"],-abs(x["period_days"]-target_days)))
+            latest=pool[-1]
+            prior=[x for x in pool if 330<=(date.fromisoformat(latest["end"])-date.fromisoformat(x["end"])).days<=400 and abs(x["period_days"]-latest["period_days"])<=30]
+            if prior:
+                prior.sort(key=lambda x:x["end"])
+                previous=prior[-1]
+                latest["yoy"]=latest["value"]/previous["value"]-1.0 if previous["value"] else None
+            latest.pop("period_days",None)
+            return latest
+        return None
     metrics={
       "revenue":latest_fact(["RevenueFromContractWithCustomerExcludingAssessedTax","SalesRevenueNet","Revenues"]),
       "net_income":latest_fact(["NetIncomeLoss"]),
@@ -2679,14 +3004,19 @@ def _sec_company_research(symbol):
       "cash_and_equivalents":latest_fact(["CashAndCashEquivalentsAtCarryingValue"])
     }
     rec=submissions.get("filings",{}).get("recent",{})
-    forms=rec.get("form",[]); dates=rec.get("filingDate",[]); accession=rec.get("accessionNumber",[]); docs=rec.get("primaryDocument",[]); report=rec.get("primaryDocDescription",[])
+    forms=rec.get("form",[]); dates=rec.get("filingDate",[]); accepted=rec.get("acceptanceDateTime",[]); accession=rec.get("accessionNumber",[]); docs=rec.get("primaryDocument",[]); report=rec.get("primaryDocDescription",[])
     filings=[]
     for i,form in enumerate(forms[:100]):
         if form not in ("10-K","10-Q","8-K","20-F","6-K"): continue
         acc=accession[i].replace("-","") if i<len(accession) else ""
         doc=docs[i] if i<len(docs) else ""
         if not acc or not doc: continue
-        filings.append({"form":form,"filed":dates[i] if i<len(dates) else None,"description":report[i] if i<len(report) else "SEC filing","url":f"https://www.sec.gov/Archives/edgar/data/{info['cik']}/{acc}/{doc}","source":"SEC EDGAR"})
+        reported={}
+        if form in ("10-K","10-Q"):
+            reported={"revenue":fact_as_reported(["RevenueFromContractWithCustomerExcludingAssessedTax","SalesRevenueNet","Revenues"],acc,form),
+                "net_income":fact_as_reported(["NetIncomeLoss"],acc,form),"assets":fact_as_reported(["Assets"],acc,form),
+                "liabilities":fact_as_reported(["Liabilities"],acc,form),"operating_cash_flow":fact_as_reported(["NetCashProvidedByUsedInOperatingActivities"],acc,form)}
+        filings.append({"form":form,"filed":dates[i] if i<len(dates) else None,"accepted_at":accepted[i] if i<len(accepted) and accepted[i] else None,"accession":accession[i] if i<len(accession) else None,"filing_facts":reported,"description":report[i] if i<len(report) else "SEC filing","url":f"https://www.sec.gov/Archives/edgar/data/{info['cik']}/{acc}/{doc}","source":"SEC EDGAR"})
         if len(filings)>=15: break
     return {"available":True,"symbol":symbol,"company":info["name"],"cik":info["cik"],"metrics":metrics,"filings":filings,"source":"SEC EDGAR Company Facts + Submissions","retrieved_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"note":"Latest reported facts can have different fiscal periods. Each value retains its own filing date and period end."}
 
@@ -2724,9 +3054,10 @@ def research_bundle(symbol):
     except Exception as exc: result["macro"]={"available":False,"reason":str(exc)[:160]}
     events=[]
     for item in result.get("news",{}).get("items",[]):
-        events.append(("finnhub_news","news_article",symbol,item,item.get("published_at")))
+        events.append(("finnhub_news","news_article",symbol,item,item.get("published_at"),item.get("published_at"),"instant" if item.get("published_at") else "unknown"))
     for item in result.get("filings",{}).get("items",[]):
-        events.append(("sec_edgar","sec_filing",symbol,item,item.get("filed") or item.get("filing_date")))
+        event_at=item.get("accepted_at") or item.get("filed") or item.get("filing_date")
+        events.append(("sec_edgar","sec_filing",symbol,item,event_at,event_at,"instant" if item.get("accepted_at") else ("date" if event_at else "unknown")))
     if result.get("fundamentals",{}).get("available"):
         snapshot=dict(result["fundamentals"]);snapshot.pop("retrieved_at",None)
         events.append(("sec_edgar","fundamental_snapshot",symbol,snapshot,None))
@@ -3433,6 +3764,7 @@ if __name__=="__main__":
     threading.Thread(target=macro_updater_loop,daemon=True,name="mira-macro-refresh").start()
     threading.Thread(target=thesis_monitor_loop,daemon=True,name="mira-thesis-monitor").start()
     def learning_supervisor_loop():
+        global EVENT_LEARNING_LAST_MONO
         # A low-cost supervisor coordinates existing collectors; provider limits and market calendars still determine actual data cadence.
         while True:
             try:
@@ -3443,6 +3775,9 @@ if __name__=="__main__":
                 # The price updater owns actual market refresh cadence; this loop records only operational status.
                 LEARNING_RUNTIME["last_supervisor_cycle"]=datetime.now(timezone.utc).isoformat(timespec="seconds")
                 LEARNING_RUNTIME["cycles"]+=1
+                if time.monotonic()-EVENT_LEARNING_LAST_MONO>=21600:
+                    EVENT_LEARNING_LAST_MONO=time.monotonic()
+                    event_learning_cycle()
             except Exception as exc:
                 LEARNING_RUNTIME["last_error"]=str(exc)[:160]
             time.sleep(60)
